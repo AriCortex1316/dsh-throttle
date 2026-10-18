@@ -1,0 +1,43 @@
+# dsh-throttle bundle patch.
+#
+# Mounts the /throttle plugin row. Everything the plugin can be tuned with lives
+# here (PLAN-throttle-mode.md section 7); the numbers are validated at load, so an
+# out-of-range value fails the plugin instead of silently passing.
+#
+# Both `effort` values must be levels the session's model actually declares in
+# the profile's `llm-pi-ai` row, otherwise the request is refused with
+# UNSUPPORTED_REASONING_EFFORT before any provider I/O. This deployment declares
+# `low` and `high` on every `commandcode` model: `low` is a standard
+# OpenAI-compatible value and the cheapest level that gateway accepts, which is
+# why the Tight tier uses it instead of trying to turn thinking off — that
+# gateway rejects `reasoning_effort: none`, and an undeclared `off` is not
+# selectable at all (see IMPLEMENTATION-throttle-mode.md).
+#
+# The row id `throttle` is the only id this bundle owns.
+#
+# The third tier, Open (`/throttle open`), deliberately has no block here: it is
+# "no ceiling, no effort override, permissions untouched", so there is nothing
+# to tune and nothing a typo could break (see IMPLEMENTATION-throttle-mode.md).
+- insert:
+    - id: throttle
+      name: 'dsh-throttle'
+      config:
+        # Tight (what every session starts in): the cheapest reasoning level, a
+        # view-only permission preset, and the tightest per-turn ceiling. The
+        # ceiling counts STEPS, not tool calls: one step is one model response,
+        # so a step that calls several tools in parallel still costs one.
+        # `toolCalls` is the pre-rename spelling and is still read as an alias.
+        default:
+          steps: 4
+          minutes: 2
+          effort: low
+          permission: read-only
+        # Wide (entered with /throttle): reasoning is let out and the permission
+        # preset goes back to the session's own. steps and minutes floor at 5,
+        # and steps must also exceed the Tight tier's (see PLAN sections 5.5 and
+        # 7, and IMPLEMENTATION section 6).
+        deep:
+          steps: 5
+          minutes: 5
+          effort: high
+          permission: restore

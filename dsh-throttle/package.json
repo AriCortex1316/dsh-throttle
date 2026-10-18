@@ -1,0 +1,55 @@
+{
+  "name": "dsh-throttle",
+  "version": "2.0.0",
+  "private": true,
+  "description": "A /throttle three-tier mode for the DeepSeek Harness: it contracts a session's boundaries into one of three positions — Tight (the tier a session starts in: cheapest declared reasoning level, view-only permissions, the tightest per-turn ceiling), Wide (configurable reasoning effort, the session's own permission preset restored, a larger ceiling that still holds), and Open (no ceiling, no effort override, permissions untouched — as if the plugin were not installed). The tier, the reason behind the current file policy and the live per-turn budget are published to the model; the Web UI carries a tier chip beside the model selector in the composer bar, and the ceilings are edited on the Plugins page instead of YAML.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./icon.svg": "./icon.svg",
+    "./locale/en.json": "./locale/en.json",
+    "./locale/zh.json": "./locale/zh.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "state.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/*.json",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "icon": "./icon.svg",
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "*",
+    "zod": "*"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-plugin-manager",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "meta": {
+    "title": "Throttle",
+    "description": "/throttle holds one session inside one of three boundaries. Tight (default): reasoning low, view-only, ≤4 steps / ≤2 min. Wide: reasoning high, the session's own writable preset restored, ≤5 steps / ≤5 min. Open: no ceiling, no reasoning override, permissions back to the session. A session started by subagent follows the tier of the session that started it, on a budget of its own. The tier chip sits beside the model selector in the composer bar; the ceilings are edited on the Plugins page and take effect without a restart."
+  }
+}

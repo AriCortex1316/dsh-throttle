@@ -1,0 +1,9 @@
+# DSH 本体内部代码转储（仅本地参考，不发布）
+reference/
+
+# 本地时间戳备份
+backup/
+
+# 依赖与日志
+node_modules/
+*.log

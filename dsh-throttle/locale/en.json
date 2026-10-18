@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Throttle tiers",
+    "description": "Three tiers bound one turn’s steps and runtime; at the limit the model hands back its findings, open questions, and next steps, so complex work advances in shorter stages."
+  }
+}

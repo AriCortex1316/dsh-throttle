@@ -1,0 +1,10 @@
+<svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M7 7H29L20.6 19.4V29H15.4V19.4L7 7Z" fill="url(#throttle-funnel)" stroke="url(#throttle-funnel)" stroke-width="0.6" stroke-linejoin="round"/>
+<defs>
+<linearGradient id="throttle-funnel" x1="7" y1="7" x2="29" y2="29" gradientUnits="userSpaceOnUse">
+<stop stop-color="#38D39F"/>
+<stop offset="0.55" stop-color="#58BCC8"/>
+<stop offset="1" stop-color="#658EFF"/>
+</linearGradient>
+</defs>
+</svg>
