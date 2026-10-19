@@ -1,9 +1,9 @@
-// Reconstruct where a dsh-throttle budget number came from, from the session log
+// Reconstruct where a dsh-throttle ceiling number came from, from the session log
 // itself: every injected `throttle:state` snapshot is a persisted `user/message`,
 // so the rendered text plus the event time let us solve for the usage record
 // the plugin was holding when it rendered that line.
 //
-// Usage: node tools/session-budget-report.mjs <session.v4.jsonl.zstd | session.jsonl>
+// Usage: node tools/session-ceiling-report.mjs <session.v4.jsonl.zstd | session.jsonl>
 import { readSessionEvents } from './session-log-decode.mjs'
 
 const iso = (time) => new Date(time).toISOString().replace('T', ' ').slice(0, 23)
@@ -12,14 +12,14 @@ const minutesOf = (text, pattern) => {
   return match === null ? null : Number(match[2])
 }
 
-/** The budget line a snapshot carries, if any. */
-function budgetLine (text) {
+/** The ceiling line a snapshot carries, if any. */
+function ceilingLine (text) {
   const progress = /This turn: (?:(\d+)\/(\d+) tool calls|step (\d+)\/(\d+)) · ([\d.]+)\/([\d.]+) min\./.exec(text)
   if (progress !== null) {
     const used = progress[1] ?? `step ${progress[3]}`
     return { kind: 'progress', display: progress[0], used, minutes: Number(progress[5]), ceiling: Number(progress[6]) }
   }
-  const minutes = /the ([\d.]+)-minute ceiling is reached \(([\d.]+) min spent\)/.exec(text)
+  const minutes = /the ([\d.]+)-minute ceiling is reached \(([\d.]+) min elapsed\)/.exec(text)
   if (minutes !== null) return { kind: 'exhausted', display: minutes[0], minutes: Number(minutes[2]), ceiling: Number(minutes[1]) }
   const calls = /the (\d+)-tool-call ceiling is reached/.exec(text)
   if (calls !== null) return { kind: 'exhausted', display: calls[0], used: calls[1] }
@@ -30,7 +30,7 @@ function budgetLine (text) {
 
 const [input] = process.argv.slice(2)
 if (input === undefined) {
-  console.error('usage: node tools/session-budget-report.mjs <session.v4.jsonl.zstd|session.jsonl>')
+  console.error('usage: node tools/session-ceiling-report.mjs <session.v4.jsonl.zstd|session.jsonl>')
   process.exit(2)
 }
 
@@ -59,12 +59,12 @@ for (const turn of turns) {
   console.log(`  turn ${turn.turn}  ${iso(turn.start)} → ${turn.end === null ? 'open' : iso(turn.end)}  wall=${wall === null ? '?' : wall.toFixed(1)}s  tool/call=${turn.toolCalls}`)
 }
 
-console.log('\ninjected budget snapshots (rendered text → solved usage record)')
+console.log('\ninjected ceiling snapshots (rendered text → solved usage record)')
 for (const [index, event] of events.entries()) {
   if (event.type !== 'user/message') continue
   const text = (event.data?.content ?? []).map((part) => part.text ?? '').join('')
-  if (!text.includes('[throttle:state]') && !text.includes("This turn's ceiling is spent")) continue
-  const line = budgetLine(text)
+  if (!text.includes('[throttle:state]') && !text.includes("This turn's ceiling is reached")) continue
+  const line = ceilingLine(text)
   if (line === null) continue
   let solved = ''
   if (line.minutes !== undefined) {

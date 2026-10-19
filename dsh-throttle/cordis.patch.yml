@@ -1,23 +1,8 @@
-# dsh-throttle bundle patch.
-#
-# Mounts the /throttle plugin row. Everything the plugin can be tuned with lives
-# here (PLAN-throttle-mode.md section 7); the numbers are validated at load, so an
-# out-of-range value fails the plugin instead of silently passing.
-#
-# Both `effort` values must be levels the session's model actually declares in
-# the profile's `llm-pi-ai` row, otherwise the request is refused with
-# UNSUPPORTED_REASONING_EFFORT before any provider I/O. This deployment declares
-# `low` and `high` on every `commandcode` model: `low` is a standard
-# OpenAI-compatible value and the cheapest level that gateway accepts, which is
-# why the Tight tier uses it instead of trying to turn thinking off — that
-# gateway rejects `reasoning_effort: none`, and an undeclared `off` is not
-# selectable at all (see IMPLEMENTATION-throttle-mode.md).
-#
-# The row id `throttle` is the only id this bundle owns.
-#
-# The third tier, Open (`/throttle open`), deliberately has no block here: it is
-# "no ceiling, no effort override, permissions untouched", so there is nothing
-# to tune and nothing a typo could break (see IMPLEMENTATION-throttle-mode.md).
+# dsh-throttle bundle patch，仅拥有 throttle 配置行。
+# 按轮限制连续探索的步数和时长，75% 用量时提示交接，超限后拒绝后续工具调用。
+# 校验先经过 Host schema；进入 apply 后的初始校验失败回退内置值，
+# 热更新失败保留上次有效值。模型未声明的 effort 等级不会覆盖当前请求。
+# Open（/throttle open）不设上限、不覆盖 effort，因此没有独立配置块。
 - insert:
     - id: throttle
       name: 'dsh-throttle'

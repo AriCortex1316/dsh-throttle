@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Throttle tiers",
-    "description": "Three tiers bound one turn’s steps and runtime; at the limit the model hands back its findings, open questions, and next steps, so complex work advances in shorter stages."
+    "description": "Three tiers control per-turn steps, elapsed time, and reasoning effort. A soft checkpoint at 75% observed usage prompts an early hand-back; exceeding a limit refuses further tools. Staged summaries help users review findings and guide the next step."
   }
 }

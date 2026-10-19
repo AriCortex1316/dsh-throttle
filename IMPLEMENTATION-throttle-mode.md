@@ -1,5 +1,36 @@
 # dsh-throttle 实现记录（含与规格的偏离）
 
+> 历史修订档案：各节按当时的实现记录，旧工具名、检查项数量和限制描述保留版本语境。
+> 当前使用语义以[使用手册](dsh-throttle/README.md)为准，验证入口见[开发说明](docs/development.md)。
+
+## 当前进度（2026-10-20）
+
+| 项目 | 状态 | 当前结果 |
+|---|---|---|
+| 模块与开发入口整理 | 已完成 | 纯逻辑拆分、兼容导出、离线检查和开发说明 |
+| 子会话权限恢复 | 已完成 | 只恢复本次运行实际替换的可选原预设；原始只读、来源不明和 `custom` 不兜底提升权限 |
+| 软阶段检查点 | 已完成 | 观察到步数或墙钟用量达到 75% 时提示交接；硬拒绝仍使用 `>` |
+| 阶段总结格式 | 已完成 | 支持 `None`、区分已执行与建议验证、增加下一阶段建议和等待回复提示 |
+| 基础离线验证 | 已通过 | 50 项行为测试、语法、manifest、客户端替身、计数探针与提示预览 |
+| 真实 schema 与 Harness 验收 | 待执行 | 本次环境未加载真实 schema 依赖，未安装或修改本机 profile |
+| 后续评估项 | 未实现 | 分钟档位顺序、整数步数校验、effort 能力失败缓存重试及更完整的实际能力展示 |
+
+权限修复在 `index.js` 用会话对象对应的内存记录保存插件写入的 pin 和写入前的预设；不改持久化投影形状或新增事件。插件重载后没有可靠来源记录时，继承档保留当前权限，用户需通过 Harness 核对处理。独立档位的原有恢复语义继续保留。
+
+软检查点仅放入 `throttle:state`，不改守卫计数、不重置当前轮，也不加入定时通知。提示装配先于 `agent/pre-step`，步数检查点可能滞后一步；阶段交接与等待回复均依赖模型遵循提示。具体规则和格式集中维护在[使用手册](dsh-throttle/README.md#阶段总结)。
+
+## 工程整理（2026-10-20）
+
+- 明确项目主线：有限探索 → 阶段总结 → 用户补充或纠偏 → 下一轮继续。
+- `state.js` 保留兼容聚合导出；纯逻辑拆分为 `lib/constants.js`、`config.js`、`projection.js`、`usage.js`、`prompts.js`、`permissions.js`。
+- Host 的可选依赖与 schema 提取为 `schemas.js`；`index.js` 继续负责 Cordis 适配，浏览器仍为无构建的 `client.js`。
+- 两个真实 schema 探针共用独立临时目录加载辅助；同步模块交付清单，并新增 `npm test` / `npm run check` 验证入口。
+- 新增 `AGENTS.md` 与开发说明；根 README 说明设计意图，插件 README 集中维护当前使用契约。README 改为中文，模型提示与 Host 回执保持英文。
+- 修正文档和界面的热更新说明：有效配置用于后续检查，包括当前轮，不重置计数。工具上限不等于生成硬中断，也没有 token 或回复长度限制。
+- 不变更三档命令、配置键、投影版本与核心计数逻辑。旧文档中关于 Open「等同卸载」、恰好一次收尾等说法不应当作调度保证。
+
+---
+
 > 对应 `PLAN-throttle-mode.md` 的实现，代码在 `dsh-throttle/`。
 > 本文记录：与规格不同的地方、为什么不同、以及各次修订改了什么——rev.3（三档 + 模型自解释）、
 > rev.4（界面：徽章 + 配置页）、rev.6（收紧档改按「步」计数）、rev.7（别名生效 / 拒配可见 / 子会话继承档位）、
@@ -32,11 +63,11 @@ PLAN 5.2 设想写会话级 `model/selection`。实现是在 agent 作用域的 
 下发前先用 `llm.resolveModelInfo()` 查该模型是否声明过这个等级，查不到就不下发——
 避免配置写错导致整轮 `UNSUPPORTED_REASONING_EFFORT`。
 
-### 1.3 额度用 `ctx.tools.guard()`，不用 `tools/pre-execute` 监听
+### 1.3 上限用 `ctx.tools.guard()`，不用 `tools/pre-execute` 监听
 
 PLAN 5.3 设想 `tools/pre-execute` 拒绝。实现改用 guard。
 
-原因：guard 在可扩展瀑布之后执行且**单调**——后面的监听者无法把已经花掉的额度重新变成许可；
+原因：guard 在可扩展瀑布之后执行且**单调**——后面的监听者无法把已经花掉的上限重新变成许可；
 同时它仍然能返回面向模型的拒绝理由。计数单位是"一次工具执行尝试"，与 PLAN 的
 「一次工具调用算 1 次」一致：被拒的尝试不计数，所以计数停在阈值上、后续每次都以同一理由被拒。
 
@@ -50,7 +81,7 @@ rev.2 只有收紧档/放宽档，两个都**有上限**：放宽档虽然放宽
 而且配置层面也表达不出"无限"。结果是用户想"回到没装插件的状态放开跑"没有入口——
 只能整个停用插件，而停用又留下 2.5 的只读遗留问题。
 
-rev.3 增加 **放开档**（`/throttle off`）：无额度上限、不计数、不下发思考等级、权限交回会话自己
+rev.3 增加 **放开档**（`/throttle off`）：无上限上限、不计数、不下发思考等级、权限交回会话自己
 （只有在会话仍被收紧档的只读预设占着时才按回会话自己的预设），定位就是"等同没有安装本插件"。
 它**没有配置块**，这是刻意的：无限不该是一个能写错的数字，回退到可用状态的出口也不该依赖配置。
 
@@ -96,7 +127,7 @@ rev.3 拆成两条：
 | 通道 | 名字 | 位置 | 变率 | 内容 |
 |---|---|---|---|---|
 | system prompt 段 | `throttle:policy` | order 520（PLAN_POLICY 500 与 TEAM_POLICY 600 之间） | 只随档位变 | 档位契约 + 常驻规则 |
-| 运行时上下文快照 | `throttle:state` | order `getContextOrder('SANDBOX_POLICY') + 2` = 112 | 每步可能变 | 档位、只读成因、本轮额度、用尽的交回格式 |
+| 运行时上下文快照 | `throttle:state` | order `getContextOrder('SANDBOX_POLICY') + 2` = 112 | 每步可能变 | 档位、只读成因、本轮上限、用尽的交回格式 |
 
 - 上下文快照由 agent loop 的 `RuntimeContextProjection.project()` **原地替换**（文本不变则完全不写），
   所以每步更新只花一行，而 system prompt 前缀保持逐字节稳定。
@@ -106,7 +137,7 @@ rev.3 拆成两条：
   插件不再加限制）`）、`pending`（`本插件的目标预设是 Y，当前是 X`——刚进本档、用户刚手动改过、或权限服务不可用，
   下一步会再校正）。首次装配发生在第一个 `agent/pre-step` **之前**，所以"未生效"是正常瞬态而不是故障，
   文案按目标/现状如实描述。
-- 守卫拒绝文本也点名 `dsh-throttle 插件的档位限制`，避免模型把额度拒绝误判成沙箱问题。
+- 守卫拒绝文本也点名 `dsh-throttle 插件的档位限制`，避免模型把上限拒绝误判成沙箱问题。
 
 用 `node tools/preview-power-text.mjs` 可以直接看三档 × 正常/超额的完整文案。
 
@@ -133,10 +164,10 @@ rev.3 拆成两条：
 ### 2.7 rev.3.1 修复：轮界必须在 prompt 装配**之前**折叠
 
 **症状**：用户在同一个 profile 的另一个会话（workspace 是 `default-workspace`）里，一条**0 次工具调用**
-的新一轮开头就收到「**本轮额度已用尽**（时间上限 2 分钟已到（已用 88.0 分钟））」，模型据此放弃检索、
+的新一轮开头就收到「**本轮上限已用尽**（时间上限 2 分钟已到（已用 88.0 分钟））」，模型据此放弃检索、
 直接按交回格式作答（该轮 reasoning 原文：`I've run out of quota. Must stop and answer in the fixed format.`）。
 
-**定位**（`node tools/session-budget-report.mjs <session.v4.jsonl.zstd>`）：
+**定位**（`node tools/session-ceiling-report.mjs <session.v4.jsonl.zstd>`）：
 
 | 注入时刻 (UTC) | 注入文本 | 反推的 `startedAt` |
 |---|---|---|
@@ -150,7 +181,7 @@ rev.3 拆成两条：
 `toFixed(1)` 让这个反推是**精确**的：某轮的 `turn/start` 若能复现同一个取整分钟数，就被唯一指认。
 
 **根因**：`AgentLoop.preStep()` 先 `systemPrompt.assemble()` + `runtimeContext.project()`，**之后**才跑
-`agent/pre-step` 瀑布。插件的额度记录只在 `agent/pre-step` 里推进，于是每轮**第一步**的快照看到的仍是
+`agent/pre-step` 瀑布。插件的上限记录只在 `agent/pre-step` 里推进，于是每轮**第一步**的快照看到的仍是
 上一轮的记录；而 `elapsedMinutes()` 是墙钟，turn 1（07:11:59）到 turn 2（08:39:59）之间 88 分钟的挂机
 就被记到新一轮头上。轮内无害（同一条记录），所以症状只在"每轮第一步"，且只在两轮之间有空档时才看得见。
 
@@ -160,16 +191,16 @@ rev.3 拆成两条：
   （`turn()` 先 append `turn/start`，再调 `preStep`），所以折叠它必然早于本次装配。
 - `turn/start` 以 `event.time` 开新一轮（`step = 1`，即即将进入的那一步，放宽档的步数行因此显示"第 1/5 步"）；
   该步自己的 `observeStep()` 随后把时钟重锚到 pre-step（同一条记录，毫秒级）。
-- `turn/end` 把记录置为 inert（`active = false`），于是两轮之间渲染的任何快照都不会声称一个已关闭轮次的额度。
+- `turn/end` 把记录置为 inert（`active = false`），于是两轮之间渲染的任何快照都不会声称一个已关闭轮次的上限。
 - `agent/pre-step` 保留为轮内计数与兜底；`ctx.tools.guard()` 的语义**不变**——它读的一直是当步之后的记录，
   所以这次修复的是"文案骗模型"，不是"工具被误拒"（那两轮工具其实没被拒，是模型自己收手了）。
-- 附带效果：一条会话的第一轮第一步现在也会显示额度行（此前 `active` 还是 false，什么都不显示）。
+- 附带效果：一条会话的第一轮第一步现在也会显示上限行（此前 `active` 还是 false，什么都不显示）。
 
 为什么不在渲染侧兜底（读 `turnBoundary` 投影的 `lastTurn` 与 `usage.turn` 比对）：那要跨包依赖
 `dsh-agent-loop` 私有的投影 key，且把判定塞进可能被多次调用的 `text` 回调里；折叠一个已经在日志里的事件更稳。
 
-**回归用例**：`usage: a turn/start opens the budget before the prompt is assembled`（纯逻辑，含 88 分钟挂机
-场景与 `turn/end` 之后的空档）与 `a turn start opens the budget before the runtime context is rendered`
+**回归用例**：`usage: a turn/start opens the ceiling before the prompt is assembled`（纯逻辑，含 88 分钟挂机
+场景与 `turn/end` 之后的空档）与 `a turn start opens the ceiling before the runtime context is rendered`
 （走插件真实路径）。
 
 ---
@@ -206,7 +237,7 @@ PLAN 第 11 节把常驻徽章 / Settings 卡片列为"要写客户端插件并�
    四个官方配置页用的都是 `configForms.get(ns)` + `whileServed`。这里跟官方走，同时把页面挂在
    `plugins.bundle.config`（卡片页直接可见，不用先点进行再点 Configure）。
    `ctx.inject(['configForms'], ...)` 让这个页面成为**可选**的：没有 `ui-settings` 时徽章照常工作、配置页整块不注册。
-3. **徽章的额度由 Host 算。** `wire.view` 里带三个档位的 `kind/max/minutes/effort`，
+3. **徽章的上限由 Host 算。** `wire.view` 里带三个档位的 `kind/max/minutes/effort`，
    客户端不重新推导 `limitsFor()` 的语义（步 vs 次调用）。代价是视图只在投影状态变化时发布，
    刚改完配置又没有任何会话事件时，面板里可能还显示旧数字；切一次档或开一轮就刷新。
    **执行侧不受影响**：守卫与提示词每步重读配置（§4.3），所以只是显示滞后。
@@ -271,7 +302,7 @@ PLAN 第 11 节把常驻徽章 / Settings 卡片列为"要写客户端插件并�
 和下面整块简介说的是同一件事、不是第二套说法。加上这一步，原本「上面一大段摘要、下面再讲一遍」的重复就没有了。
 
 页面顺序因此是：`meta.description` 提炼行 → 简介（收尾是「用法：…」一行，走三级文字色）→
-一条 `--dsw-alias-border-l2` 细线 → 「改完怎么生效」说明 → 两个额度块。
+一条 `--dsw-alias-border-l2` 细线 → 「改完怎么生效」说明 → 两个上限块。
 
 语言跟 Harness 自己的语言走：`intro.*` 词条写进 `client.js` 的 `en` / `zh` 两份字典，
 `meta.description` 同时写进 `locale/en.json` 与 `locale/zh.json`
@@ -296,7 +327,7 @@ PLAN 第 11 节把常驻徽章 / Settings 卡片列为"要写客户端插件并�
   用一个极简 React 替身（`createElement` / `useState` / `Fragment`，按组件保存 hook 状态以便重渲染）
   真的把 `client.js` 加载并渲染：两个槽位注册与注入面（配置页在 `configForms` 之后、`whileServed` 之内注册；
   缺 `ui-settings` 时整块不注册）、徽章在投影首帧前不渲染、面板三段式切换真的发出 `/throttle off`、
-  「配置额度…」跳到 Plugins 页、缺命令通道时给可读提示；配置页 8 个控件与当前值、`已覆盖 / 内置默认` 标记、
+  「配置上限…」跳到 Plugins 页、缺命令通道时给可读提示；配置页 8 个控件与当前值、`已覆盖 / 内置默认` 标记、
   暂存后保存发出的**那一条操作**（含 revision）、低于下限时拦住保存、未 serve / 读取中两种回退文案；
   以及简介块的落位（在配置表单与「改完怎么生效」之前）、五条场合、目标句与收尾的「用法」一行，
   并在 `en` 字典下再渲染一遍这一页。
@@ -304,10 +335,10 @@ PLAN 第 11 节把常驻徽章 / Settings 卡片列为"要写客户端插件并�
 - manifest 契约检查：`node tools/verify-power-manifest.mjs`（`dsh.client` / `exports["./client"]` /
   工厂 id 等于包名 / 浏览器半边只 require 静态模块表里的东西 / 图标与双语 locale 元数据 / 两个 peer）。
 - 文案抽查：`node tools/preview-power-text.mjs`。
-- 历史会话核查：`node tools/scan-sessions.mjs`（统计每个会话里的 `[power]` 文案、文件策略行、额度拒绝次数），
+- 历史会话核查：`node tools/scan-sessions.mjs`（统计每个会话里的 `[power]` 文案、文件策略行、上限拒绝次数），
   `node tools/read-session.mjs <session-id>` 渲染成可读转录——rev.3 的定位正是靠这些日志确认的
-  （收紧档只读 + 额度拒绝 + 模型看不到成因）。
-- 额度数字溯源：`node tools/session-budget-report.mjs <session.v4.jsonl.zstd>` 逐条列出注入过的额度行，
+  （收紧档只读 + 上限拒绝 + 模型看不到成因）。
+- 上限数字溯源：`node tools/session-ceiling-report.mjs <session.v4.jsonl.zstd>` 逐条列出注入过的上限行，
   用 `toFixed(1)` 的取整反推它属于哪一轮，并对"渲染在 X 轮、记录属于 Y 轮"标 `⚠ STALE`。rev.3.1 就是它定出来的。
 - 多帧 zstd 解码只有一份：`node tools/session-log-decode.mjs <session.v4.jsonl.zstd> [out.jsonl]` 里的
   `scanZstdFrames`/`decodeSessionArtifact` 被上面三个工具共同 import（`zstdDecompressSync` 直接吃多帧文件
@@ -318,7 +349,7 @@ PLAN 第 11 节把常驻徽章 / Settings 卡片列为"要写客户端插件并�
 ## 6. rev.6：收紧档改为按「步」计数（取消工具调用上限）
 
 **起因**：收紧档数的是「工具调用」——`ctx.tools.guard()` 每执行一次就 `usage.toolCalls += 1`。
-于是一条消息里并行发 4 个调用就一次性吃掉整轮额度（实测：两条消息、共 4 次调用即被拒），
+于是一条消息里并行发 4 个调用就一次性吃掉整轮上限（实测：两条消息、共 4 次调用即被拒），
 而用户要的语义是「只限制步数，不要限制工具调用次数」。并行铺开本来就不该受罚，
 受约束的应该是「这一轮往前走了多远」。
 
@@ -343,10 +374,10 @@ PLAN 第 11 节把常驻徽章 / Settings 卡片列为"要写客户端插件并�
    （fail-open）。配置错误从此只损失数字，不损失插件；`resolveConfig` 本身仍然 fail loud。
 3. profile 的 `cordis.patch.yml` 已就地改成 `steps: 4`（`deep.steps: 10`，10 > 4 满足新校验）。
 
-**回归用例**：`budget: the default tier allows four steps of tools, then exactly one closing step`
+**回归用例**：`ceiling: the default tier allows four steps of tools, then exactly one closing step`
 （内含「一步里 12 次并行调用仍全部放行」）、`config: shipped values are accepted and the deep floor is enforced`
 （legacy alias 与 `deep.steps > default.steps` 两条）、
-`the guard refuses calls once the default step ceiling is spent, through the real plugin path`。
+`the guard refuses calls once the default step ceiling is reached, through the real plugin path`。
 
 **跑测试**：沙箱下 `node --test <file>` 会因为 `spawn EPERM` 失败（child_process 拿不到命名管道），
 直接用 `node dsh-throttle/test/throttle.test.mjs` 在进程内跑，44 条。
@@ -366,7 +397,7 @@ schema 先填成 4，`toolCalls: 6` 静默变成 4 步，比抛错更难发现�
 
 **改法**：`default.steps` 去掉 `.default(4)`，让"填默认值"只发生在 `resolveConfig` 这一处；其余字段默认值不动。
 表单显示不受影响——配置页的每个控件自带 `fallback`（`client.js` 的 `BLOCKS`），值缺失时显示的仍是 4。
-验证放在 `tools/probe-throttle-config.mjs`（用真 schema 跑真代码）与 `tools/probe-throttle-budgets.mjs` A 段。
+验证放在 `tools/probe-throttle-config.mjs`（用真 schema 跑真代码）与 `tools/probe-throttle-ceilings.mjs` A 段。
 
 ### 7.2 被拒配置不再静默回落（修）
 
@@ -389,8 +420,8 @@ reconcile 写成 read-only，父会话在放宽档也照样只读。而插件安
   `session.header.parentSession` 逐级向上（`ctx.get('agents').get(id).session` 拿活会话，取不到则用
   `knownTiers` 记住的上一次结果，再取不到才回落到自己折出的 default）。**实时**解析，不是创建时快照，
   所以父会话切档会立刻带着子会话一起变；带环检测，最多一条链。
-- 预算仍然**按会话**存（`WeakMap` 键是 session 对象），子会话拿自己的 4/10 步与 2/15 分钟，不占父会话的步数；
-  但父会话在 `subagent` 调用里等待时**墙钟照走**，所以一次长委派会吃掉父会话的分钟额度——这一条写进 README。
+- 边界仍然**按会话**存（`WeakMap` 键是 session 对象），子会话拿自己的 4/10 步与 2/15 分钟，不占父会话的步数；
+  但父会话在 `subagent` 调用里等待时**墙钟照走**，所以一次长委派会吃掉父会话的分钟上限——这一条写进 README。
 - 权限：委派时 Harness 已固定子会话的 scope（子 agent 的运行时上下文原话是 "your permission scope was fixed
   when you were started"）。因此继承来的放宽/放开档**只解除插件自己写过的那次只读 pin**
   （`wantedPresetFor`：current 是 `read-only` → 恢复可写；否则不表态），不写 preset、不动 approval。

@@ -10,7 +10,7 @@
  * Usage: node tools/verify-throttle-manifest.mjs
  */
 import { readFileSync, statSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -41,6 +41,23 @@ check('the package is an ESM plugin package', manifest.type === 'module' && type
 check('the bundle patch is declared', manifest.dsh?.bundle?.patch === './cordis.patch.yml' && exists('cordis.patch.yml'))
 const patch = readFileSync(join(pluginDir, 'cordis.patch.yml'), 'utf8')
 check('the patch inserts the throttle row', /- insert:/.test(patch) && /id: throttle/.test(patch) && /name: 'dsh-throttle'/.test(patch))
+
+// 拆分后的 Host 模块必须随包交付；检查实际相对 import 的完整依赖链。
+const shipped = (file) => (manifest.files ?? []).some((entry) => entry === file || (entry.endsWith('/') && file.startsWith(entry)))
+const visited = new Set()
+function checkHostModule (file) {
+  if (visited.has(file)) return
+  visited.add(file)
+  check(`Host 模块存在且纳入交付：${file}`, exists(file) && shipped(file))
+  if (!exists(file)) return
+  const source = readFileSync(join(pluginDir, file), 'utf8')
+  for (const match of source.matchAll(/(?:from\s*|import\s*)['"]([^'"]+)['"]/g)) {
+    if (!match[1].startsWith('.')) continue
+    const dependency = resolve(dirname(join(pluginDir, file)), match[1])
+    checkHostModule(relative(pluginDir, dependency).split('\\').join('/'))
+  }
+}
+checkHostModule('index.js')
 
 // ── the browser half: what dsh-client-modules scans ──────────────────────────
 const client = manifest.dsh?.client

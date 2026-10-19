@@ -1,0 +1,16 @@
+{
+  "name": "dsh-throttle-workspace",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "npm --prefix dsh-throttle test",
+    "check": "node tools/check.mjs",
+    "check:manifest": "node tools/verify-throttle-manifest.mjs",
+    "check:client": "node tools/probe-throttle-client.mjs",
+    "check:ceilings": "node tools/probe-throttle-ceilings.mjs",
+    "preview": "node tools/preview-throttle-text.mjs"
+  }
+}

@@ -8,22 +8,22 @@
  *    schema default there would silently overwrite whatever the patch said.
  *    This section runs the real schema over the real config and shows which
  *    value survives.
- * B. **whose budget a step is charged to** — the plugin keys its budget by the
+ * B. **whose ceiling a step is charged to** — the plugin keys its ceiling by the
  *    session object, and a `subagent` child with no `/throttle` of its own
  *    inherits the tier of the session that delegated to it. This section drives
  *    the real plugin with a parent session and a child session and shows both.
  *
  * Usage:
  *
- *     node tools/probe-throttle-budgets.mjs
- *     node tools/probe-throttle-budgets.mjs <schemasteryDir> <zodDir>
+ *     node tools/probe-throttle-ceilings.mjs
+ *     node tools/probe-throttle-ceilings.mjs <schemasteryDir> <zodDir>
  *
  * Without the two package arguments, section A reports itself as skipped (it
  * needs the real `@deepseek-ai/schemastery` to be meaningful); section B needs
  * no dependency at all. See the README's "offline checks" for how to extract
  * those packages from the installation.
  */
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { loadThrottleSchema } from './load-throttle-schema.mjs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -48,26 +48,7 @@ console.log('\n── A. the ceiling unit (steps vs the legacy toolCalls alias) 
 if (schemaDir === undefined) {
   note('skipped: pass <schemasteryDir> <zodDir> to run it against the real schema')
 } else {
-  // The plugin's own code, with its two dynamic bare specifiers pointed at the
-  // packages extracted from the installation (same trick as
-  // probe-throttle-config.mjs, so this runs the shipped files unmodified).
-  const scratch = join(process.env.TEMP ?? '/tmp', 'dsh-throttle-budget-probe')
-  rmSync(scratch, { recursive: true, force: true })
-  mkdirSync(join(scratch, 'plugin'), { recursive: true })
-  for (const file of ['index.js', 'state.js']) {
-    cpSync(join(root, 'dsh-throttle', file), join(scratch, 'plugin', file))
-  }
-  const indexPath = join(scratch, 'plugin', 'index.js')
-  const source = readFileSync(indexPath, 'utf8')
-  const patched = source
-    .replace("await import('@deepseek-ai/schemastery')", `await import(${JSON.stringify(pathToFileURL(join(schemaDir, 'lib', 'index.mjs')).href)})`)
-    .replace("await import('zod')", `await import(${JSON.stringify(pathToFileURL(join(zodDir, 'index.js')).href)})`)
-  if (patched === source) throw new Error('probe: no dynamic import specifier was rewritten — index.js changed shape')
-  writeFileSync(indexPath, patched)
-
-  const schemastery = (await import(pathToFileURL(join(schemaDir, 'lib', 'index.mjs')).href)).default
-  const plugin = await import(pathToFileURL(indexPath).href)
-  const state = await import(pathToFileURL(join(scratch, 'plugin', 'state.js')).href)
+  const { schemastery, plugin, state } = await loadThrottleSchema(schemaDir, zodDir)
   const Config = plugin.Config
 
   // What a profile patch that predates the rename still says.
@@ -96,8 +77,8 @@ if (schemaDir === undefined) {
   note(`plugin verdict on the same pair: ${refused === null ? 'accepted' : refused.message}`)
 }
 
-// ── B. the budget record: one per session, and a child inherits the tier ────
-console.log('\n── B. the budget record: one per session, plus the inherited tier ──')
+// ── B. the ceiling record: one per session, and a child inherits the tier ────
+console.log('\n── B. the ceiling record: one per session, plus the inherited tier ──')
 
 const { apply } = await import(pathToFileURL(join(root, 'dsh-throttle', 'index.js')).href)
 const { resolveConfig } = await import(pathToFileURL(join(root, 'dsh-throttle', 'state.js')).href)
@@ -255,9 +236,9 @@ async function step (h, session, turn, stepNumber, at) {
     /the 4-step ceiling is reached/.test(h.guard(h.child) ?? ''), String(h.guard(h.child)))
 }
 
-// Scenario 2: a Wide delegator's child runs Wide, with a budget of its own.
+// Scenario 2: a Wide delegator's child runs Wide, with a ceiling of its own.
 {
-  const h = harness('workspace-write', 'custom')
+  const h = harness('workspace-write', 'workspace-write')
   await step(h, h.parent, 1, 1)
   await step(h, h.child, 1, 1)
   const wide = h.throttle(h.parent, '')
@@ -295,6 +276,16 @@ async function step (h, session, turn, stepNumber, at) {
   check('and its snapshot counts only its own steps',
     /This turn: step 2\/10 ·/.test(h.contextOf(h.parent)),
     h.contextOf(h.parent).split('\n').filter((line) => line.includes('This turn')).join(''))
+}
+
+// 原始只读或无法按名称恢复的委派预设，不得兜底提升为可写。
+for (const original of ['read-only', 'custom']) {
+  const h = harness('workspace-write', original)
+  await step(h, h.child, 1, 1)
+  h.throttle(h.parent, 'open')
+  await step(h, h.child, 1, 2)
+  check(`继承 Open 不把 ${original} 委派权限提升为可写`,
+    h.service.current(h.child) === 'read-only', String(h.service.current(h.child)))
 }
 
 // Scenario 3: the clock is shared, the step counter is not.

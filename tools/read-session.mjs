@@ -74,7 +74,7 @@ function render (record) {
       return `  [tool] ${data.name} ${JSON.stringify(data.arguments ?? data.args ?? {}).slice(0, 240)}`
     case 'tool/result': {
       const text = textOf(data)
-      const denied = /denied|not permitted|ceiling is spent|tier ceiling/.test(text)
+      const denied = /denied|not permitted|ceiling is reached|tier ceiling/.test(text)
       return `  [result${denied ? ' !!DENIED/REFUSED' : ''}] ${text.replace(/\s+/g, ' ').slice(0, 300)}`
     }
     default:

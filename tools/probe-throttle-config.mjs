@@ -6,47 +6,24 @@
  * installation packages through the profile-resolution router, gated on
  * `peerDependencies`). This probe reproduces that environment offline:
  *
- * 1. it copies `index.js` + `state.js` into a scratch directory and rewrites the
- *    ONE dynamic import specifier to the schemastery copy extracted from the
- *    installed Harness, so the probe runs the plugin's real code;
+ * 1. 通过 load-throttle-schema.mjs 复制完整运行源码到独立临时目录，
+ *    将 schemas.js 的两个依赖入口指向调用方提供的真实包；
  * 2. it resolves configs through the real `Config` schema exactly as Cordis
  *    does, and checks the volatile references the settings form edits;
  * 3. it replays `dsh-settings`' own form algorithm (`volatileForm`, path
  *    validation, `strip`, `mergeLayers`) over that schema, so the shape this
  *    probe proves is the shape the Plugins page writes into the profile patch.
  *
- * Usage: node tools/probe-throttle-config.mjs <schemasteryDir>
+ * Usage: node tools/probe-throttle-config.mjs <schemasteryDir> <zodDir>
  */
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
-
-const here = dirname(fileURLToPath(import.meta.url))
-const root = resolve(here, '..')
+import { loadThrottleSchema } from './load-throttle-schema.mjs'
 const schemaDir = process.argv[2]
 const zodDir = process.argv[3]
 if (schemaDir === undefined || zodDir === undefined) {
   throw new Error('usage: node tools/probe-throttle-config.mjs <schemastery package dir> <zod package dir>')
 }
 
-const scratch = join(process.env.TEMP ?? '/tmp', 'dsh-throttle-config-probe')
-rmSync(scratch, { recursive: true, force: true })
-mkdirSync(join(scratch, 'plugin'), { recursive: true })
-for (const file of ['index.js', 'state.js']) {
-  cpSync(join(root, 'dsh-throttle', file), join(scratch, 'plugin', file))
-}
-const indexPath = join(scratch, 'plugin', 'index.js')
-const source = readFileSync(indexPath, 'utf8')
-const schemaEntry = pathToFileURL(join(schemaDir, 'lib', 'index.mjs')).href
-const zodEntry = pathToFileURL(join(zodDir, 'index.js')).href
-const patched = source
-  .replace("await import('@deepseek-ai/schemastery')", `await import(${JSON.stringify(schemaEntry)})`)
-  .replace("await import('zod')", `await import(${JSON.stringify(zodEntry)})`)
-if (patched === source) throw new Error('probe: no dynamic import specifier was rewritten — index.js changed shape')
-writeFileSync(indexPath, patched)
-
-const schemastery = (await import(schemaEntry)).default
-const plugin = await import(pathToFileURL(indexPath).href)
+const { schemastery, plugin, state: { resolveConfig } } = await loadThrottleSchema(schemaDir, zodDir)
 
 /** Fail loudly with a labelled message. */
 function check (label, condition, detail) {
@@ -68,7 +45,6 @@ const SHIPPED = {
   default: { steps: 4, minutes: 2, effort: 'low', permission: 'read-only' },
   deep: { steps: 5, minutes: 5, effort: 'high', permission: 'restore' }
 }
-const { resolveConfig } = await import(pathToFileURL(join(scratch, 'plugin', 'state.js')).href)
 const [resolved] = schemastery.resolve(SHIPPED, Config)
 check('the config blocks arrive as stable references', typeof resolved.default.get === 'function' && typeof resolved.deep.get === 'function')
 check('a shipped block reads back unchanged', JSON.stringify(resolved.default.get()) === JSON.stringify(SHIPPED.default), JSON.stringify(resolved.default.get()))

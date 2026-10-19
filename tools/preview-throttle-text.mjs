@@ -4,7 +4,7 @@
  *
  * Prints the `throttle:policy` system-prompt section and the `throttle:state`
  * runtime-context snapshot for every tier, at a fresh turn, mid-turn, and with
- * the budget spent — plus the inherited-tier copy a delegated sub-session reads
+ * the ceiling spent — plus the inherited-tier copy a delegated sub-session reads
  * and the copy a refused row config produces — so the model-facing text can be
  * reviewed without running the Harness.
  *
@@ -28,11 +28,14 @@ const T0 = 1_000_000
 const rows = [
   ['default', 'pending', 'workspace-write', 'read-only', 0],
   ['default', 'plugin', 'read-only', null, 0],
+  ['default', 'plugin', 'read-only', null, 2],
   ['default', 'plugin', 'read-only', null, 3],
   ['default', 'plugin', 'read-only', null, 5],
   ['deep', 'session', 'workspace-write', null, 3],
+  ['deep', 'session', 'workspace-write', null, 4],
   ['deep', 'session', 'workspace-write', null, 6],
   ['deep', 'delegated', 'workspace-write', null, 1, { inherited: true }],
+  ['deep', 'delegated', 'workspace-write', null, 4, { inherited: true }],
   ['free', 'session', 'workspace-write', null, 12],
   ['free', 'session', 'read-only', null, 12],
   ['free', 'pending', 'read-only', 'workspace-write', 12]

@@ -1,234 +1,97 @@
-# dsh-throttle
+# dsh-throttle：思考限流与阶段总结
 
-A `/throttle` **three-tier boundary control** for the DeepSeek Harness (DSH): one
-session, three positions on one throttle. The plugin's job is to contract a
-session's boundaries — how much reasoning it may spend, how many steps one turn
-may use, how long a turn may run, and what the file policy is allowed to be.
+`dsh-throttle` 是 DeepSeek Harness（DSH）的三档限流插件，用每轮步数、持续时长和 reasoning effort 约束连续探索。接近上限时提示阶段交接，超限后拒绝后续工具调用并要求总结，把决定下一步的机会交回用户。
 
-- **Tight** (the tier a session starts in) — cheapest declared reasoning level,
-  view-only permissions, the tightest per-turn ceiling.
-- **Wide** (`/throttle`) — a configurable reasoning level, the session's own
-  permission preset restored, a larger ceiling that still holds.
-- **Open** (`/throttle open`) — no ceiling, no effort override, permissions
-  untouched: as if the plugin were not installed.
+希望形成的协作节奏是：**有限探索 → 阶段总结 → 补充细节或调整方向 → 继续下一轮**。信息不足时先给出已有结论和关键疑问；方向发生偏移时，用户能在下一轮及时纠正；复杂任务则通过多次可检查的小阶段逐步推进。
 
-## Why it exists
+## 设计想法
 
-1. **Every turn was thinking.** The models on the `commandcode` route declared no
-   `reasoningEfforts`, so DSH treated them as having no reasoning control, sent no
-   switch at all, and the gateway fell back to its own default — always on. Slow,
-   token-hungry, and prone to drifting off the question.
-2. **Everyday questions do not need deep reasoning.** Chat and lookups should land
-   in one or two tool calls.
-3. **Real work needs room, but a bounded amount of it.** Deep tasks want freedom
-   with a hard ceiling, not unbounded exploration.
-4. **A missing flow constraint.** Nothing told the model to offer directions first
-   and *stop to ask* when the requirements were thin — so a one-line request could
-   turn straight into an implementation.
+Agent 容易把一个问题不断展开：追加搜索、扩大修改范围、反复推演细枝末节，直到很久以后才交回结果。用户在过程中很难补充遗漏条件，也难以及时判断方向是否合适。
 
-The ceiling is the point: when a session spends it, the model must stop and hand
-back a fixed checkpoint (current conclusions, what is still unconfirmed, and the
-commands you should run to verify) instead of silently retrying. That turns a
-runaway turn into a decision you get to make.
+插件用档位控制一次连续探索的尺度，让总结更频繁地出现。阶段总结应说明已经确认的事实、影响后续决策的缺失信息、实际采用的默认假设、验证情况和一个有边界的下一步。没有问题或假设时如实说明；任务完成时直接交付结果。用户补充信息后，再开始一轮有边界的工作。
 
-## The three tiers
+这里的“思考限流”由三部分构成：reasoning effort 调节模型请求的思考等级，步数和墙钟上限约束后续工具执行，提示文本引导模型收尾。**当前实现不会硬中断正在进行的模型生成或工具执行，也没有 token 数、隐藏思考长度或回复字数上限。总结格式依赖模型遵循提示。**
 
-| | **Tight** (what a session starts in) | **Wide** (`/throttle`) | **Open** (`/throttle open`) |
-|---|---|---|---|
-| Reasoning | cheapest level the model declares (default `low`) | the configured level (default `high`) | **not sent** (the session / model selector keeps its own) |
-| Per-turn ceiling | ≤4 steps / ≤2 min | ≤5 steps / ≤5 min | **none** (and nothing is counted) |
-| Permissions | view-only (`read-only`), asserted by this plugin | the session's own preset, restored | the session's own preset, left alone |
-| Position | everyday questions, cheap and bounded | real work, still hard-bounded | **as if the plugin were not installed** |
+## 三个档位
 
-**A "step" is one model response, not one tool call.** However many tools a step
-calls in parallel, it costs exactly one — so the ceiling bounds how far a turn
-walks, not how wide a single step spreads. Past the ceiling the over-limit step's
-tool calls are refused, the refusal names the plugin's tier as the reason, and the
-model is told to hand back in the fixed format.
+下表为内置默认值，可在 Plugins 页调整两个有限档的配置。
 
-## Usage
+| 档位 | reasoning effort | 每轮工具探索上限 | 权限意图 | 使用场景 |
+|---|---|---|---|---|
+| 🍃 收紧 Tight（默认） | `low`，模型声明支持时覆盖 | 4 步 / 2 分钟 | 固定为 `read-only` | 快速问答、初步调查、澄清需求 |
+| ⚡ 放宽 Wide | `high`，模型声明支持时覆盖 | 5 步 / 5 分钟 | 恢复会话预设 | 分阶段实现、调查和验证 |
+| ♾️ 放开 Open | 保留会话的选择 | 不设上限 | 使用会话预设 | 用户决定连续推进的任务 |
 
-### Commands
+**一步是模型的一次回复，不是一次工具调用。** 同一步并行调用多个工具仍算一步。工具守卫在步数大于配置值或已用时间大于配置值时拒绝后续调用，并要求模型停止重试、给出阶段总结。模型仍可生成不调用工具的收尾回复。
 
-| Command | Effect |
+有限档在观察到步数或时间用量达到 75% 时提供软阶段检查点，引导模型完成已有结果、交回关键问题，或仅做最重要的剩余验证。检查点随上下文装配刷新，步数提示可能滞后一步；阶段交接和等待回复依赖模型遵循提示。具体触发规则见[阶段总结](dsh-throttle/README.md#阶段总结)。
+
+上限按会话、按轮计算；子会话有自己的计数。它不会限制同一步的并行宽度，也不是整个任务或所有子会话的总额度。完整的计数、权限恢复和继承语义见[使用手册](dsh-throttle/README.md)。
+
+## 使用
+
+点击输入条模型选择器旁的档位徽章查看和切换，也可以输入命令：
+
+| 命令 | 效果 |
 |---|---|
-| `/throttle` | toggle **Tight ⇄ Wide** (typed from Open, re-engages the plugin at Tight) |
-| `/throttle wide` (or `deep`) | enter **Wide** explicitly |
-| `/throttle open` (or `off`, `free`, `unlimited`) | enter **Open** |
-| `/throttle tight` (or `on`, `default`) | return to **Tight** explicitly |
+| `/throttle` | 收紧与放宽互切；从放开档返回收紧 |
+| `/throttle wide` | 进入放宽档，别名 `deep` |
+| `/throttle open` | 进入放开档，别名 `off`、`free`、`unlimited` |
+| `/throttle tight` | 返回收紧档，别名 `on`、`default` |
 
-Attachments are refused; a stray argument is an error and changes nothing. Every
-switch leaves one receipt line in the conversation, for example:
+切换通过 Host 命令写入会话日志，成功后由投影更新徽章，并留下一条回执。打开 **Plugins → dsh-throttle** 可以修改步数、分钟数、思考等级和权限配置。
 
-```
-⚡ Wide · reasoning high · ≤5 steps · ≤5 min · preset restored (workspace-write)
-```
+一次阶段总结后，可以直接补充：“优先处理 Windows，先完成配置读取和测试，UI 留到下一轮。”新一轮重新计数；无需为了继续任务而切到放开档。
 
-### The tier chip
+## 安装
 
-In the composer bar, in the trailing group immediately **before the model
-selector**, sits a chip showing the current tier: `🍃 Tight` / `⚡ Wide` / `♾️ Open`.
-Hovering shows the tier and its ceiling; clicking opens a panel with a three-way
-segmented switch, the current tier's four facts (ceiling, reasoning level,
-permissions, equivalent command), and a jump to the ceiling editor.
+要求 Node.js 22 或以上，以及具备相应 Cordis 服务的 DSH。仓库是原生 ESM，无构建步骤；离线基础检查无需安装依赖。
 
-A switch is not client-side optimism — it executes the very same `/throttle …`
-command a human types, so a refused switch cannot display a tier that never
-happened, and nothing fails silently.
+在仓库根目录执行：
 
-### Editing the ceilings
-
-Sidebar **Plugins** → the **dsh-throttle** card → open it. Two blocks (**Tight**,
-**Wide**), four fields each, with hints, an `i` explanation per field, an
-**Overridden / Built-in default** marker and a **Reset to default** button. Saving
-applies immediately — no remount, no page reload, no restart. The **Open tier has
-no configuration block on purpose**: "no limit" is not a number anybody could get
-wrong, and the way back to a usable position must not depend on configuration.
-
-| Field | Default | Meaning |
-|---|---|---|
-| `default.steps` | `4` | steps one Tight turn may take (must stay below `deep.steps`) |
-| `default.minutes` | `2` | Tight wall-clock ceiling per turn |
-| `default.effort` | `low` | reasoning level Tight sends (must be one the model declares) |
-| `default.permission` | `read-only` | preset Tight pins the session to |
-| `deep.steps` | `5` | steps one Wide turn may use (**floor 5**, must exceed `default.steps`) |
-| `deep.minutes` | `5` | Wide wall-clock ceiling (**floor 5**) |
-| `deep.effort` | `high` | reasoning level Wide sends |
-| `deep.permission` | `restore` | give the session its own preset back (read-only is never a restore target) |
-
-The same values can be written by hand in the profile's `cordis.patch.yml`:
-
-```yaml
-- id: throttle
-  name: 'dsh-throttle'
-  config:
-    default: { steps: 4, minutes: 2, effort: low,  permission: read-only }
-    deep:    { steps: 5, minutes: 5, effort: high, permission: restore }
+```sh
+node tools/install-dsh-throttle.mjs          # 预览变更
+node tools/install-dsh-throttle.mjs --apply  # 备份、写入并校验
 ```
 
-Hand-editing needs a Harness restart; the Plugins-page form does not. A refused
-config is loud, not silent: the built-in numbers stand in, the reason is named in
-the model-facing snapshot, and every `/throttle` receipt repeats it.
+安装脚本面向 `DSH_HOME`（默认 `~/.dsh`）下的 `profiles/desktop`，会配置插件链接、bundle 选择，以及该部署的模型 reasoning effort 声明；安装后重启 Harness。它包含针对现有模型配置的处理，首次使用应先看预览。旧版 `dsh-power` 的迁移和卸载步骤见[使用手册](dsh-throttle/README.md#安装迁移与卸载)。
 
-## Install
+## 开发与验证
 
-```powershell
-node tools/install-dsh-throttle.mjs            # dry run: print the change set + validate YAML
-node tools/install-dsh-throttle.mjs --apply    # write, then verify
-node tools/install-dsh-throttle.mjs --rollback --apply
+```sh
+npm test       # 核心行为测试
+npm run check  # 语法、测试、manifest、客户端渲染与独立计数检查
+npm run preview # 预览三档的模型提示与总结格式
 ```
 
-Installing does four things in the desktop profile: adds a `link:` dependency on
-this directory, appends `dsh-throttle` to `dsh.profile.bundles`, creates a
-junction under the profile's `node_modules`, and declares
-`reasoningEfforts: { low, high }` on the `commandcode` models. Everything is
-backed up to `backup/<timestamp>/` first. **Restart the Harness afterwards** — the
-bundle list and the browser plugin graph are composed at startup.
+`npm run check` 的客户端部分使用 React 和 Host 服务替身，计数探针会明确跳过需要真实 schema 包的部分。真实 schema 校验命令、Harness 手工验收步骤见[开发说明](docs/development.md)。
 
-Upgrading from the plugin's former name (`dsh-power` / `/power`), run the one-step
-migration instead:
+## 仓库结构
 
-```powershell
-node tools/migrate-dsh-power-profile.mjs --apply
+```text
+dsh-throttle/
+  index.js              Cordis Host 集成：命令、事件、守卫、权限与模型请求
+  schemas.js            可选 schema 依赖、Config 与 wire.viewSchema
+  state.js              核心逻辑的兼容导出入口
+  lib/
+    constants.js        稳定标识、档位、投影版本
+    config.js           配置校验与档位上限
+    projection.js       会话事件折叠与浏览器视图
+    usage.js            每轮计数、时间检查与工具拒绝
+    prompts.js          档位提示、阶段总结格式与运行时上下文
+    permissions.js      权限恢复目标
+  client.js             Harness 原生浏览器模块：徽章与配置页
+  locale/               插件元数据的中英文文案
+  test/                 核心行为测试
+tools/                  安装、验证、文案预览和日志诊断
+docs/development.md     工程约定、验证入口与手工验收
+AGENTS.md               供代码 Agent 使用的仓库协作指南
 ```
 
-> **Run `/throttle open` before removing the plugin.** Tight writes a `read-only`
-> permission preset into each session log, and once the plugin is gone nothing
-> puts it back — such a session stays read-only with nothing explaining why. For a
-> session already stuck there, pick a writable preset in the permissions selector
-> or run `/permission workspace-write`.
+`reference/` 是本地 Harness 参考转储，`backup/` 是本地安装备份，两者均被 Git 忽略。
 
-## What the model can see
+- [使用手册](dsh-throttle/README.md)：配置、计数边界、总结格式和已知限制。
+- [AGENTS.md](AGENTS.md)：修改代码时应遵循的契约与验证要求。
+- [原始方案](PLAN-throttle-mode.md)与[实现记录](IMPLEMENTATION-throttle-mode.md)：历史设计与取舍；当前行为以源码、测试和使用手册为准。
 
-The tier is self-describing, through two channels:
-
-- **`throttle:policy`** — the tier's contract and the standing rules, in the system
-  prompt. It changes only with the tier, so an ordinary step never rewrites the
-  cached prompt prefix.
-- **`throttle:state`** — a runtime-context snapshot ordered right after the
-  Harness's own `sandbox:policy`, so the line following
-  `Current DSH file policy: read-only` explains that this read-only came from the
-  plugin's Tight tier rather than from the deployment or the user. It carries the
-  turn's budget progress and renders the fixed hand-back format once the ceiling is
-  spent.
-
-A delegated sub-session **inherits the tier of the session that started it**, on a
-budget of its own: a Tight delegator's child is Tight and view-only, a Wide
-delegator's child is Wide, an Open delegator's child is Open. The delegator's wall
-clock keeps running while it waits on the delegation, but its step counter is not
-charged. Running `/throttle …` inside a child ends the inheritance for that session.
-
-To read the model-facing copy verbatim:
-
-```powershell
-node tools/preview-throttle-text.mjs    # every tier × fresh/spent
-```
-
-## Repository layout
-
-```
-dsh-throttle/                 the plugin itself (host half, browser half, locale, tests)
-  index.js                    host half: config, tiers, guard, prompt + runtime context
-  state.js                    the session projection that holds the tier
-  client.js                   browser half: the tier chip and the settings form
-  cordis.patch.yml            the bundle patch row
-  locale/{en,zh}.json         bilingual UI copy
-  test/throttle.test.mjs      44 unit cases
-tools/                        development and diagnostic scripts
-  install-dsh-throttle.mjs    install / rollback into a profile
-  migrate-dsh-power-profile.mjs  one-step migration from the old name
-  preview-throttle-text.mjs   print every model-facing string
-  verify-throttle-manifest.mjs  manifest ↔ client-half contract
-  probe-throttle-*.mjs        client render, config schema, counting contracts
-  asar-read.mjs, asar-probe.mjs, scan-sessions.mjs, …  offline inspection helpers
-PLAN-throttle-mode.md         the specification (Chinese)
-IMPLEMENTATION-throttle-mode.md  deviations from the spec and why (Chinese)
-```
-
-`reference/` (a local dump of DSH internals) and `backup/` (timestamped profile
-backups) are **git-ignored and not part of this repository** — the docs above refer
-to them as local-only working material.
-
-## Tests
-
-```powershell
-node dsh-throttle/test/throttle.test.mjs   # 44 cases; use this form in a restricted shell
-node --test dsh-throttle/test/             # the normal form (spawns a child)
-```
-
-The settings form and the browser half ride real contracts, so four offline checks
-cover what a unit environment without `@deepseek-ai/schemastery` / `zod` / React
-cannot:
-
-```powershell
-node tools/verify-throttle-manifest.mjs   # manifest ↔ client contract, 19 items
-node tools/probe-throttle-client.mjs      # really render the browser half, 56 items
-```
-
-See [`dsh-throttle/README.md`](dsh-throttle/README.md) for the schema probe and the
-counting probe, the full item-by-item coverage, and the known trade-offs.
-
-## Documentation
-
-- [`dsh-throttle/README.md`](dsh-throttle/README.md) — the full user-facing manual:
-  every interface, every field, the model-facing copy, install/rollback, coverage
-  and trade-offs.
-- [`PLAN-throttle-mode.md`](PLAN-throttle-mode.md) — the specification (Chinese).
-- [`IMPLEMENTATION-throttle-mode.md`](IMPLEMENTATION-throttle-mode.md) — where the
-  implementation departs from the spec, and why (Chinese).
-
-## Known trade-offs, in brief
-
-- **Tight is "the cheapest reasoning level", not "no thinking"**: the gateway
-  rejects `none`, and sending nothing lets it keep its own expensive default. For
-  genuinely unconstrained thinking, use Open.
-- **Tight keeps pushing the preset back to `read-only`** once per step
-  (idempotently). That is deliberate — Tight *means* view-only, and the way out is
-  `/throttle` or `/throttle open`.
-- **The chip's numbers can lag one step** behind a just-saved config edit; tier
-  switching or a new turn refreshes them. **Enforcement always uses the newest
-  values** — this is display lag only.
-
-## License
-
-MIT, as declared in [`dsh-throttle/package.json`](dsh-throttle/package.json).
+插件 manifest 声明许可证为 MIT。

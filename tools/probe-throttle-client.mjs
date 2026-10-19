@@ -324,10 +324,10 @@ check('the panel offers a three-way tier switch',
 check('the panel marks the current tier', segmented.props.value === 'deep')
 check('the panel states the current tier facts',
   panelText.includes('≤5 步 · ≤5 分钟') && panelText.includes('high') && panelText.includes('/throttle wide') &&
-  panelText.includes('恢复该会话自己的预设'),
+  panelText.includes('恢复会话预设') && panelText.includes('继承档子会话仅释放有来源记录的插件限制'),
   panelText)
 check('the panel is a modal', stubs.some((s) => s.name === 'Modal'))
-const configureButton = stubs.find((s) => s.name === 'Button' && stubText(s) === '配置额度…')
+const configureButton = stubs.find((s) => s.name === 'Button' && stubText(s) === '配置上限…')
 check('the panel offers the plugin page', configureButton !== undefined)
 configureButton.props.onClick()
 check('which opens the bundle page on the Plugins page', opened.join(',') === 'dsh-throttle', JSON.stringify(opened))
@@ -422,7 +422,7 @@ check('each control carries the current value and its explanation',
   fields.find((f) => f.props.id === 'dsh-throttle-deep-steps')?.props.text === '5' &&
   String(fields.find((f) => f.props.id === 'dsh-throttle-default-effort')?.props.help?.content).includes('模型真实声明过'),
   JSON.stringify(fields.find((f) => f.props.id === 'dsh-throttle-deep-steps')?.props))
-check('the page explains how a save takes effect', pageText.includes('改完怎么生效') && pageText.includes('下一轮'), pageText.slice(0, 200))
+check('the page explains how a save takes effect', pageText.includes('改完怎么生效') && pageText.includes('后续检查'), pageText.slice(0, 200))
 // The introduction sits at the very top of the page, above the form it introduces
 // and above the paragraph that explains the two editable blocks.
 check('the page opens with the plugin introduction',
@@ -431,7 +431,7 @@ check('the page opens with the plugin introduction',
   pageText.indexOf('通过不同档位') < pageText.indexOf('下面两组数字'),
   pageText.slice(0, 200))
 check('the introduction lists the five situations and states its goal',
-  ['补充缺失细节后再继续', '中途调整任务方向', '检查当前结论是否符合预期', '在成本或时间过高时提前结束',
+  ['补充缺失细节后再继续', '中途调整任务方向', '检查当前结论是否符合预期', '在一轮跑得过久或跑偏时提前收手',
     '防止简单问题演变成没完没了的深度探索', '核心目标不是降低 DSH 的能力'].every((line) => pageText.includes(line)),
   pageText.slice(0, 400))
 // The last line of the block is the one line of usage, and it stays inside the
@@ -506,7 +506,7 @@ check('raising the Tight ceiling onto the Wide one blocks the save', orderBlocke
 check('and the page names the refused pair', orderText.includes('放宽档步数（5）必须大于收紧档步数（5）'), orderText.slice(-400))
 check('no write is sent for that either', writes.length === 1, JSON.stringify(writes.map((w) => w.ops)))
 stubs.filter((s) => s.name === 'SettingsValueField').find((f) => f.props.id === 'dsh-throttle-default-steps').props.onReset()
-check('the summary view is a one-liner', render(React.createElement(page.Component, { ...pageProps, view: 'summary' })) === '三档档位，以及每轮的额度、思考等级与权限。')
+check('the summary view is a one-liner', render(React.createElement(page.Component, { ...pageProps, view: 'summary' })) === '三档档位，以及每轮的上限、思考等级与权限。')
 const unavailable = render(React.createElement(page.Component, { ...pageProps, useThrottleConfig: (selector) => selector(undefined) }))
 check('a form the Host does not serve says so', unavailable.includes('没有提供插件设置表单'), unavailable)
 const loading = render(React.createElement(page.Component, { ...pageProps, useThrottleConfig: (selector) => selector({ status: 'loading' }) }))

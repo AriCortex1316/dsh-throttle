@@ -3,10 +3,10 @@
  *
  * Run from the plugin's parent directory (no Harness runtime needed):
  *
- *     node --test dsh-throttle/test/
+ *     node --test dsh-throttle/test/throttle.test.mjs
  *
- * The plugin entry imports only its own `state.js`, so these tests exercise the
- * real registration, projection, command, guard, prompt-section, context, and
+ * 插件核心保持纯 Node 可加载，schema 外部依赖通过动态导入降级。
+ * These tests exercise the real registration, projection, command, guard, prompt-section, context, and
  * per-agent request paths through a fake Cordis context that models the
  * Harness's own behaviour closely enough to be meaningful: commands append
  * `command/run` before the handler and `command/done` after it, the session is
@@ -23,7 +23,7 @@ import test from 'node:test'
 import { apply, inject, name } from '../index.js'
 import {
   applyThrottleEvent,
-  budgetState,
+  ceilingState,
   createThrottleProjection,
   EMPTY_THROTTLE_STATE,
   emptyUsage,
@@ -244,7 +244,7 @@ test('config: a bare row gets the plan defaults', () => {
   assert.equal(config.default.steps, 4)
   assert.equal(config.default.minutes, 2)
   assert.equal(config.default.permission, 'read-only')
-  assert.equal(config.default.effort, 'low', 'the default tier uses the cheapest level a gateway accepts, not an untenable "off"')
+  assert.equal(config.default.effort, 'low', 'the default tier uses the lowest level a gateway accepts, not an untenable "off"')
   assert.equal(config.deep.steps, 5)
   assert.equal(config.deep.minutes, 5)
   assert.equal(config.deep.effort, 'high')
@@ -255,7 +255,7 @@ test('limits: the free tier has no ceiling, pins no effort, and counts nothing',
   assert.deepEqual(limitsFor(config, 'free'), { kind: 'unlimited', max: Infinity, minutes: Infinity, effort: null })
   const usage = emptyUsage()
   observeStep(usage, { turn: 1, step: 9 }, T0)
-  assert.equal(budgetState(config, 'free', usage, T0 + 86_400_000).exhausted, false, 'a day of work does not trip a ceiling')
+  assert.equal(ceilingState(config, 'free', usage, T0 + 86_400_000).exhausted, false, 'a day of work does not trip a ceiling')
   for (let attempt = 1; attempt <= 50; attempt += 1) {
     assert.equal(guardDecision(config, 'free', usage, T0 + 86_400_000), undefined, `free call ${attempt} is allowed`)
   }
@@ -276,7 +276,7 @@ test('usage: a turn boundary resets the counters', () => {
   assert.deepEqual({ step: usage.step, startedAt: usage.startedAt }, { step: 1, startedAt: T0 + 3 })
 })
 
-test('usage: a turn/start opens the budget before the prompt is assembled', () => {
+test('usage: a turn/start opens the ceiling before the prompt is assembled', () => {
   const config = resolveConfig(SHIPPED)
   const permission = { preset: 'read-only', source: 'plugin' }
   const usage = emptyUsage()
@@ -284,11 +284,11 @@ test('usage: a turn/start opens the budget before the prompt is assembled', () =
 
   // The loop renders the runtime context before `agent/pre-step` runs, so the
   // record a turn's first snapshot sees is the previous turn's. Elapsed time is
-  // wall clock, which is how 88 minutes of sitting idle read as a spent budget.
+  // wall clock, which is how 88 minutes of sitting idle read as a reached ceiling.
   const opened = T0 + 88 * 60_000
   const unfold = stateContext(config, 'default', usage, opened, permission)
-  assert.match(unfold, /This turn's ceiling is spent/)
-  assert.match(unfold, /the 2-minute ceiling is reached \(88\.0 min spent\)/)
+  assert.match(unfold, /This turn's ceiling is reached/)
+  assert.match(unfold, /the 2-minute ceiling is reached \(88\.0 min elapsed\)/)
 
   observeSessionEvent(usage, { type: 'turn/start', data: { turn: 2 }, time: opened }, opened)
   assert.deepEqual(
@@ -296,9 +296,9 @@ test('usage: a turn/start opens the budget before the prompt is assembled', () =
     { active: true, turn: 2, step: 1, startedAt: opened }
   )
   const snapshot = stateContext(config, 'default', usage, opened + 40, permission)
-  assert.match(snapshot, /This turn: step 1\/4 · 0\.0\/2 min\./, 'a new turn reports an untouched budget')
-  assert.ok(!snapshot.includes('ceiling is spent'))
-  assert.equal(budgetState(config, 'default', usage, opened + 40).exhausted, false)
+  assert.match(snapshot, /This turn: step 1\/4 · 0\.0\/2 min\./, 'a new turn reports an untouched ceiling')
+  assert.ok(!snapshot.includes('ceiling is reached'))
+  assert.equal(ceilingState(config, 'default', usage, opened + 40).exhausted, false)
   assert.equal(guardDecision(config, 'default', usage, opened + 40), undefined, 'and its first tool call is allowed')
 
   // The step's own boundary lands on the same record: it must not re-count or
@@ -309,32 +309,32 @@ test('usage: a turn/start opens the budget before the prompt is assembled', () =
   assert.match(stateContext(config, 'default', usage, opened + 100, permission), /step 1\/4/)
 
   // A closed turn leaves the record inert, so no snapshot rendered in the gap
-  // between two turns can claim a budget the closed turn never had.
+  // between two turns can claim a ceiling the closed turn never had.
   observeSessionEvent(usage, { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } }, time: opened + 5000 }, opened + 5000)
   assert.equal(usage.active, false)
   const between = stateContext(config, 'default', usage, opened + 10 * 60_000, permission)
-  assert.ok(!between.includes('This turn:'), 'an idle gap carries no budget line')
-  assert.ok(!between.includes('ceiling is spent'))
-  assert.equal(budgetState(config, 'default', usage, opened + 10 * 60_000).exhausted, false)
+  assert.ok(!between.includes('This turn:'), 'an idle gap carries no ceiling line')
+  assert.ok(!between.includes('ceiling is reached'))
+  assert.equal(ceilingState(config, 'default', usage, opened + 10 * 60_000).exhausted, false)
 
   // An unrelated event is not a boundary.
   observeSessionEvent(usage, { type: 'permission/preset', data: { preset: 'read-only' }, time: opened + 6000 }, opened + 6000)
   assert.equal(usage.active, false)
 })
 
-test('budget: nothing is enforced before a turn boundary is seen', () => {
+test('ceiling: nothing is enforced before a turn boundary is seen', () => {
   const config = resolveConfig(SHIPPED)
   const usage = emptyUsage()
-  assert.equal(budgetState(config, 'default', usage, T0).exhausted, false)
+  assert.equal(ceilingState(config, 'default', usage, T0).exhausted, false)
   assert.equal(guardDecision(config, 'default', usage, T0), undefined)
 })
 
-test('budget: the default tier allows four steps of tools, then exactly one closing step', () => {
+test('ceiling: the default tier allows four steps of tools, then exactly one closing step', () => {
   const config = resolveConfig(SHIPPED)
   const usage = emptyUsage()
   for (let step = 1; step <= 4; step += 1) {
     observeStep(usage, { turn: 1, step }, T0)
-    assert.equal(budgetState(config, 'default', usage, T0).exhausted, false, `step ${step} is inside the budget`)
+    assert.equal(ceilingState(config, 'default', usage, T0).exhausted, false, `step ${step} is inside the ceiling`)
     assert.equal(guardDecision(config, 'default', usage, T0), undefined, `step ${step} may use tools`)
     // Fan-out is free: a step that calls twelve tools in parallel still costs one.
     for (let call = 1; call <= 12; call += 1) {
@@ -351,27 +351,27 @@ test('budget: the default tier allows four steps of tools, then exactly one clos
   assert.equal(guardDecision(config, 'default', usage, T0), denied, 'the denial is sticky')
 })
 
-test('budget: the two-minute ceiling denies by time', () => {
+test('ceiling: the two-minute ceiling denies by time', () => {
   const config = resolveConfig(SHIPPED)
   const usage = emptyUsage()
   observeStep(usage, { turn: 1, step: 1 }, T0)
-  assert.equal(budgetState(config, 'default', usage, T0 + 119_000).exhausted, false)
-  const state = budgetState(config, 'default', usage, T0 + 121_000)
+  assert.equal(ceilingState(config, 'default', usage, T0 + 119_000).exhausted, false)
+  const state = ceilingState(config, 'default', usage, T0 + 121_000)
   assert.equal(state.exhausted, true)
   assert.match(state.reason, /the 2-minute ceiling is reached/)
   assert.match(guardDecision(config, 'default', usage, T0 + 121_000), /the 2-minute ceiling/)
 })
 
-test('budget: the deep tier allows five steps of tools, then exactly one closing step', () => {
+test('ceiling: the deep tier allows five steps of tools, then exactly one closing step', () => {
   const config = resolveConfig(SHIPPED)
   const usage = emptyUsage()
   for (let step = 1; step <= 5; step += 1) {
     observeStep(usage, { turn: 1, step }, T0)
-    assert.equal(budgetState(config, 'deep', usage, T0).exhausted, false, `step ${step} is inside the budget`)
+    assert.equal(ceilingState(config, 'deep', usage, T0).exhausted, false, `step ${step} is inside the ceiling`)
     assert.equal(guardDecision(config, 'deep', usage, T0), undefined, `step ${step} may use tools`)
   }
   observeStep(usage, { turn: 1, step: 6 }, T0)
-  const state = budgetState(config, 'deep', usage, T0)
+  const state = ceilingState(config, 'deep', usage, T0)
   assert.equal(state.exhausted, true)
   assert.match(state.reason, /the 5-step ceiling is reached/)
   const denied = guardDecision(config, 'deep', usage, T0)
@@ -397,12 +397,12 @@ test('prompt section: the tier contract is stable per tier and carries no counte
 
   const free = policySection(config, 'free', { preset: 'workspace-write', source: 'session' })
   assert.match(free, /^\[throttle\] current tier: Open/)
-  assert.match(free, /sets no limit at all/)
-  assert.match(free, /as if this plugin were not installed/)
+  assert.match(free, /sets no tool, step or time ceiling/)
+  assert.match(free, /standing collaboration rules still apply/)
   assert.ok(free.includes(STANDING_RULES), 'the standing rules survive into the free tier by design')
 })
 
-test('state context: it explains a read-only policy, tracks the budget, and carries the hand-back format', () => {
+test('state context: it explains a read-only policy, tracks the ceiling, and carries the hand-back format', () => {
   const config = resolveConfig(SHIPPED)
   const usage = emptyUsage()
   observeStep(usage, { turn: 1, step: 3 }, T0)
@@ -413,7 +413,7 @@ test('state context: it explains a read-only policy, tracks the budget, and carr
   assert.match(text, /The plugin's Tight tier pins the session permission preset to read-only/)
   assert.match(text, /it is not DSH's deployment default/)
   assert.match(text, /This turn: step 3\/4 · 0\.5\/2 min\./)
-  assert.ok(!text.includes('## What I found'), 'a fresh turn must not carry the hand-back format')
+  assert.ok(text.includes(SURRENDER_TEMPLATE), '步数达到 75% 时提前提供阶段交接格式')
 
   const deep = stateContext(config, 'deep', usage, T0 + 60_000, { preset: 'workspace-write', source: 'session' })
   assert.match(deep, /^\[throttle:state\] tier: Wide/)
@@ -421,17 +421,76 @@ test('state context: it explains a read-only policy, tracks the budget, and carr
 
   observeStep(usage, { turn: 1, step: 5 }, T0)
   const spent = stateContext(config, 'default', usage, T0, { preset: 'read-only', source: 'plugin' })
-  assert.match(spent, /\*\*This turn's ceiling is spent\*\* \(the 4-step ceiling is reached \(now on step 5\)\)/)
+  assert.match(spent, /\*\*This turn's ceiling is reached\*\* \(the 4-step ceiling is reached \(now on step 5\)\)/)
   assert.ok(spent.includes(SURRENDER_TEMPLATE), 'the fixed hand-back format must be rendered verbatim')
 
   const free = stateContext(config, 'free', usage, T0 + 60_000, { preset: 'read-only', source: 'session' })
   assert.match(free, /^\[throttle:state\] tier: Open/)
   assert.match(free, /No ceiling and no reasoning override in this tier; permissions: the session's own preset read-only/)
   assert.match(free, /it has nothing to do with this plugin/, 'the free tier must not blame itself for the session\'s own read-only preset')
-  assert.ok(!free.includes('This turn:'), 'the free tier has no budget to report')
+  assert.ok(!free.includes('This turn:'), 'the free tier has no ceiling to report')
 
   const stuck = stateContext(config, 'free', usage, T0, { preset: 'read-only', source: 'pending', target: 'workspace-write' })
   assert.match(stuck, /putting the permission preset back to the session's own/)
+})
+
+test('软检查点覆盖两个有限档的步数和时间边界，且不提前拒绝工具', () => {
+  const config = resolveConfig(SHIPPED)
+  const permission = { preset: 'read-only', source: 'plugin' }
+  for (const mode of ['default', 'deep']) {
+    const limits = limitsFor(config, mode)
+    const usage = emptyUsage()
+    const checkpointStep = Math.ceil(limits.max * 0.75)
+    observeStep(usage, { turn: 1, step: checkpointStep - 1 }, T0)
+    assert.ok(!stateContext(config, mode, usage, T0, permission).includes('Stage checkpoint'))
+    observeStep(usage, { turn: 1, step: checkpointStep }, T0)
+    const before = { ...usage }
+    assert.match(stateContext(config, mode, usage, T0, permission), /Stage checkpoint/)
+    assert.equal(guardDecision(config, mode, usage, T0), undefined)
+    assert.deepEqual(usage, before)
+
+    observeStep(usage, { turn: 2, step: 1 }, T0)
+    const at = T0 + limits.minutes * 60_000 * 0.75
+    assert.ok(!stateContext(config, mode, usage, at - 1, permission).includes('Stage checkpoint'))
+    assert.match(stateContext(config, mode, usage, at, permission), /Stage checkpoint/)
+    assert.equal(guardDecision(config, mode, usage, at), undefined)
+    const exactLimit = T0 + limits.minutes * 60_000
+    assert.match(stateContext(config, mode, usage, exactLimit, permission), /Stage checkpoint/)
+    assert.equal(guardDecision(config, mode, usage, exactLimit), undefined)
+    const exhausted = stateContext(config, mode, usage, exactLimit + 1, permission)
+    assert.ok(!exhausted.includes('Stage checkpoint'))
+    assert.match(exhausted, /This turn's ceiling is reached/)
+    assert.match(guardDecision(config, mode, usage, exactLimit + 1), /Suggested next stage/)
+  }
+})
+
+test('软检查点跳过空闲和 Open，跟随新轮次及有效配置', () => {
+  const config = resolveConfig(SHIPPED)
+  const usage = emptyUsage()
+  const render = (mode = 'default', settings = config) => stateContext(settings, mode, usage, T0, {})
+  assert.ok(!render().includes('Stage checkpoint'))
+  observeStep(usage, { turn: 1, step: 3 }, T0)
+  assert.match(render(), /Stage checkpoint/)
+  assert.ok(!render('free').includes('Stage checkpoint'))
+  const wider = resolveConfig({ default: { steps: 8 }, deep: { steps: 9 } })
+  assert.ok(!render('default', wider).includes('Stage checkpoint'))
+  assert.equal(usage.step, 3)
+  observeSessionEvent(usage, { type: 'turn/end' }, T0)
+  assert.ok(!render().includes('Stage checkpoint'))
+  observeSessionEvent(usage, { type: 'turn/start', data: { turn: 2 } }, T0)
+  assert.ok(!render().includes('Stage checkpoint'))
+})
+
+test('阶段交接支持真实空项、完成状态与委派会话回复', () => {
+  const config = resolveConfig(SHIPPED)
+  const usage = emptyUsage()
+  observeStep(usage, { turn: 1, step: 4 }, T0)
+  const text = stateContext(config, 'deep', usage, T0, {}, { inherited: true })
+  assert.match(text, /reply from the delegating session/)
+  assert.ok(text.includes(SURRENDER_TEMPLATE))
+  assert.match(SURRENDER_TEMPLATE, /write None/)
+  assert.match(SURRENDER_TEMPLATE, /checks already run from suggested checks/)
+  assert.match(SURRENDER_TEMPLATE, /if complete, say Complete/)
 })
 
 test('permission phrases: each source says who owns the preset', () => {
@@ -450,7 +509,7 @@ test('permission phrases: each source says who owns the preset', () => {
 test('receipts: all three tiers report themselves in the plan format', () => {
   const config = resolveConfig(SHIPPED)
   assert.equal(receiptText(config, 'deep', 'workspace-write'), '⚡ Wide · reasoning high · ≤5 steps · ≤5 min · preset restored (workspace-write)')
-  assert.equal(receiptText(config, 'default', 'view-only'), '🍃 Tight · reasoning low (cheapest) · ≤4 steps · ≤2 min · view-only')
+  assert.equal(receiptText(config, 'default', 'view-only'), '🍃 Tight · reasoning low (lowest) · ≤4 steps · ≤2 min · view-only')
   assert.equal(receiptText(config, 'free', 'workspace-write'), '♾️ Open · no ceiling · no reasoning override · preset left alone (workspace-write)')
   assert.equal(statusLine(config, 'deep', 'restore'), '⚡ Wide · reasoning high · ≤5 steps · ≤5 min · preset restored (restore)')
   assert.equal(statusLine(config, 'deep', undefined), '⚡ Wide · reasoning high · ≤5 steps · ≤5 min · preset restored (kept as is)')
@@ -731,6 +790,51 @@ test('a delegated sub-session runs on the tier its delegator is in', async () =>
   assert.equal(guard({ agent: parent }), undefined)
 })
 
+test('继承 Wide/Open 保留子会话原有的只读权限', async () => {
+  for (const mode of ['wide', 'open']) {
+    for (const throughTight of [false, true]) {
+      const { harness, parent, child, childLog } = delegation()
+      harness.service.set(child.session, 'read-only')
+      const before = childLog('permission/preset').length
+      if (throughTight) await harness.emit('agent/pre-step', { agent: child, turn: 1, step: 1 })
+      harness.throttle(parent, mode)
+      await harness.emit('agent/pre-step', { agent: child, turn: 1, step: 2 })
+      assert.equal(harness.service.current(child.session), 'read-only')
+      assert.equal(childLog('permission/preset').length, before)
+      assert.match(harness.captured.contexts[0].text({ agent: child }), /delegated sub-session was started with \(read-only\)/)
+    }
+  }
+})
+
+test('继承档仅恢复插件实际替换的委派预设，不使用可写兜底', async () => {
+  for (const original of ['workspace-write', 'danger-full-access', 'custom']) {
+    const { harness, parent, child } = delegation({ preset: original })
+    await harness.emit('agent/pre-step', { agent: child, turn: 1, step: 1 })
+    assert.equal(harness.service.current(child.session), 'read-only')
+    harness.throttle(parent, 'open')
+    await harness.emit('agent/pre-step', { agent: child, turn: 1, step: 2 })
+    assert.equal(harness.service.current(child.session), original === 'custom' ? 'read-only' : original)
+  }
+})
+
+test('插件重新加载后不推断旧只读 pin 的归属', async () => {
+  const { harness, parent, child } = delegation()
+  await harness.emit('agent/pre-step', { agent: child, turn: 1, step: 1 })
+  harness.throttle(parent, 'open')
+  const resumed = fakeCtx({
+    preset: 'read-only',
+    log: harness.registry.logs.get('child-1'),
+    agents: { get: () => ({ session: harness.session }) }
+  })
+  apply(resumed.ctx, SHIPPED)
+  // 新注册表需要父会话日志，才能恢复子会话继承的 Open 档。
+  resumed.registry.logs.set('child-1', harness.registry.logs.get('child-1'))
+  resumed.registry.logs.set(harness.session.header.id, harness.registry.logs.get(harness.session.header.id))
+  await resumed.emit('agent/pre-step', { agent: child, turn: 2, step: 1 })
+  assert.match(resumed.captured.contexts[0].text({ agent: child }), /tier: Open/)
+  assert.equal(resumed.service.current(child.session), 'read-only')
+})
+
 test('a sub-session\'s own /throttle ends the inheritance', async () => {
   const { harness, parent, child } = delegation()
   await harness.emit('agent/pre-step', { agent: parent, turn: 1, step: 1 })
@@ -767,7 +871,7 @@ test('a refused row config is named in the snapshot and in the receipt', async (
   assert.match(receipt.text, /the row config was refused, so the numbers above are the plugin's built-in defaults/)
 })
 
-test('the prompt section is byte-identical across steps while the context follows the budget', async () => {
+test('the prompt section is byte-identical across steps while the context follows the ceiling', async () => {
   const harness = fakeCtx()
   apply(harness.ctx, SHIPPED)
   const agent = { session: harness.session }
@@ -781,7 +885,7 @@ test('the prompt section is byte-identical across steps while the context follow
   assert.match(context.text({ agent }), /This turn: step 1\/4/)
 
   const [guard] = harness.captured.guards
-  assert.equal(guard({ agent }), undefined, 'a call inside the budget is allowed')
+  assert.equal(guard({ agent }), undefined, 'a call inside the ceiling is allowed')
   assert.match(context.text({ agent }), /This turn: step 1\/4/, 'and it does not spend the ceiling: the unit is the step')
   await harness.emit('agent/pre-step', { agent, turn: 1, step: 2 })
   assert.equal(section.text({ agent }), sectionBefore, 'an ordinary step must not rewrite the cached prompt head')
@@ -803,13 +907,13 @@ test('/throttle walks the three tiers and prints the receipt', async () => {
   const free = harness.throttle(agent, ' off')
   assert.equal(free.kind, 'success')
   assert.match(free.text, /^♾️ Open · no ceiling · no reasoning override · preset left alone \(workspace-write\)/)
-  assert.match(free.text, /Open tier: this plugin sets no ceiling/)
+  assert.match(free.text, /Open tier: no step or time ceiling/)
   assert.equal(harness.service.preset, 'workspace-write', 'the free tier leaves the session writable')
   assert.equal(modeOfState(harness.registry.stateOf(harness.session, 'throttleMode')), 'free', '/throttle off must reach the unlimited tier')
 
   const back = harness.throttle(agent, ' on')
   assert.equal(back.kind, 'success')
-  assert.match(back.text, /^🍃 Tight · reasoning low \(cheapest\) · ≤4 steps · ≤2 min · view-only/)
+  assert.match(back.text, /^🍃 Tight · reasoning low \(lowest\) · ≤4 steps · ≤2 min · view-only/)
   assert.equal(harness.service.preset, 'read-only', 'the default tier confines again')
 
   assert.match(harness.throttle(agent, ' deep').text, /^⚡ Wide/)
@@ -895,7 +999,7 @@ test('the guard only counts sessions the plugin has seen', () => {
   assert.equal(guard({}), undefined)
 })
 
-test('the guard refuses calls once the default step ceiling is spent, through the real plugin path', async () => {
+test('the guard refuses calls once the default step ceiling is reached, through the real plugin path', async () => {
   const harness = fakeCtx()
   apply(harness.ctx, SHIPPED)
   const agent = { session: harness.session }
@@ -903,17 +1007,17 @@ test('the guard refuses calls once the default step ceiling is spent, through th
   for (let step = 1; step <= 4; step += 1) {
     await harness.emit('agent/pre-step', { agent, turn: 3, step })
     for (let call = 1; call <= 3; call += 1) {
-      assert.equal(guard({ agent }), undefined, `step ${step}, call ${call} is inside the budget`)
+      assert.equal(guard({ agent }), undefined, `step ${step}, call ${call} is inside the ceiling`)
     }
   }
   await harness.emit('agent/pre-step', { agent, turn: 3, step: 5 })
   assert.match(guard({ agent }), /the 4-step ceiling is reached/, 'the over-limit step may not call tools')
   assert.match(guard({ agent }), /the 4-step ceiling is reached/, 'the refusal holds for the rest of the step')
   await harness.emit('agent/pre-step', { agent, turn: 4, step: 1 })
-  assert.equal(guard({ agent }), undefined, 'a new turn opens a fresh budget')
+  assert.equal(guard({ agent }), undefined, 'a new turn opens a fresh ceiling')
 })
 
-test('a turn start opens the budget before the runtime context is rendered', async () => {
+test('a turn start opens the ceiling before the runtime context is rendered', async () => {
   const harness = fakeCtx()
   apply(harness.ctx, SHIPPED)
   const agent = { session: harness.session }
@@ -929,7 +1033,7 @@ test('a turn start opens the budget before the runtime context is rendered', asy
   // the snapshot the new turn carries is already its own.
   harness.appendEvent(harness.session, { type: 'turn/start', data: { turn: 2 }, time: Date.now() })
   assert.match(render(), /This turn: step 1\/4 · 0\.0\/2 min\./)
-  assert.ok(!render().includes('ceiling is spent'))
+  assert.ok(!render().includes('ceiling is reached'))
   const [guard] = harness.captured.guards
   assert.equal(guard({ agent }), undefined, 'and the new turn may use its tools')
 })

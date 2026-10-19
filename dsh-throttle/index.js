@@ -1,71 +1,11 @@
 /**
- * `/throttle` — a three-tier mode for one Harness session.
- *
- * Default tier (the tier a session starts in): reasoning pinned to the cheapest
- * level the model declares, permissions limited to viewing, and a tight
- * per-turn budget. Deep tier (`/throttle`): a configurable reasoning effort, the
- * session's own permission preset restored, and a larger budget that still has
- * a ceiling. Free tier (`/throttle off`): the plugin stops constraining the
- * session altogether — no budget at all, no effort override, permissions left
- * to the session — which is the "as if the plugin were not installed" tier the
- * plan originally lacked, and the way out of the default tier's read-only trap.
- *
- * Two model-facing channels keep the model informed about which tier it is in
- * and *why* the file policy looks the way it does (see `IMPLEMENTATION-throttle-mode.md`):
- *
- * 1. `throttle:policy` — a system-prompt section whose text changes only with the
- *    tier, so a normal step never rewrites the cached prompt head.
- * 2. `throttle:state` — a runtime-context snapshot ordered right after the
- *    first-party `sandbox:policy` contribution. The Harness replaces the
- *    previous snapshot when the text changes, so this is where the live budget
- *    and the spent-budget hand-back format belong; sitting next to the
- *    `Current DSH file policy` line is what lets the model connect "read-only"
- *    to "the plugin's default tier wrote that preset".
- *
- * The plugin is an `apply`-form plugin whose only static import is its own
- * `state.js`, so it stays importable by a plain `node` process for unit testing
- * and cannot fail to load over a bare specifier. The two schema libraries it
- * needs are therefore loaded through optional **dynamic** imports — schemastery
- * for the settings form's `Config`, Zod for the projection's `wire.viewSchema`
- * (the wire contract's schema language) — and each degrades to a documented
- * fallback instead of failing the row. See the `schemastery` / `zod` bindings
- * below for why those are the right two.
- *
- * The browser half (`client.js`) draws the tier chip beside the model selector in
- * the composer bar and the row's configuration page on the Plugins page; it reads
- * the tier from this projection's published view and switches tiers by executing
- * the same `/throttle …` lines a human types, so the log stays the only source of
- * truth.
- *
- * Deviations from the plan and their reasons are recorded in
- * `../IMPLEMENTATION-throttle-mode.md`. The three that shape this file:
- *
- * 1. The tier is a session projection folded from `command/run` and
- *    `command/done` — event types the Harness already persists — instead of a
- *    plugin-owned `throttle/mode` event. A live `Session.append()` cannot set the
- *    `ignorable` marker that the persistence read path requires of a type
- *    outside `KNOWN_SESSION_EVENT_TYPES`, so a `throttle/mode` event would make
- *    every session containing it refuse to reopen. The projection keeps the
- *    plan's durability property — replay on restart and resume, inherited by a
- *    fork — without inventing log vocabulary.
- * 2. Reasoning effort is applied on the agent-scoped `agent/request` waterfall
- *    rather than by writing `model/selection`. That channel is per-session and
- *    never touches the profile's global default model, which the plan forbids;
- *    it also cannot clobber the provider/model the user picked in the selector,
- *    because this listener only ever replaces `reasoningEffort`. The free tier
- *    replaces nothing at all.
- * 3. The budget is enforced with `ctx.tools.guard()` rather than a
- *    `tools/pre-execute` listener: a guard is monotonic, so no later listener
- *    can turn a spent budget back into permission, and it still returns a
- *    model-facing reason.
- *
- * @module dsh-throttle
+ * Cordis Host 入口：连接命令、会话投影、工具守卫与模型请求。
+ * 纯逻辑位于 lib/，schema 位于 schemas.js，浏览器入口为 client.js。
  */
 
 import {
   EMPTY_THROTTLE_STATE,
   MODE_LABELS,
-  MODES,
   createThrottleProjection,
   emptyUsage,
   guardDecision,
@@ -84,6 +24,9 @@ import {
   wantedPreset
 } from './state.js'
 
+import { settingsSchemaError, viewSchema } from './schemas.js'
+export { Config, settingsSchemaError } from './schemas.js'
+
 /** Cordis plugin name. */
 export const name = 'dsh-throttle'
 
@@ -95,110 +38,6 @@ export const name = 'dsh-throttle'
 export const inject = ['commands', 'systemPrompt', 'tools', 'sessionProjections']
 
 /**
- * Schemastery, loaded through a **dynamic** import.
- *
- * Two reasons this is not a plain `import`:
- *
- * 1. The unit tests import this module from a bare `node` process in the
- *    plugin's own directory, where no `node_modules` resolves
- *    `@deepseek-ai/schemastery` at all. A static import would make the whole
- *    test file fail to load.
- * 2. A linked profile plugin resolves bare specifiers through the Harness's
- *    profile-resolution router, which hands out an installation package only
- *    when the plugin's own manifest lists it as a peer dependency (see
- *    `dsh-app-boot`'s linked-layer routing, and `@moguiyu/dsh-tavily`'s
- *    manifest for the same convention). If that ever stops holding, a static
- *    import fails the plugin row outright; here it degrades to "no settings
- *    form" with a logged warning.
- */
-let schemastery = null
-let schemasteryError = null
-try {
-  schemastery = (await import('@deepseek-ai/schemastery')).default
-} catch (error) {
-  schemasteryError = error instanceof Error ? error.message : String(error)
-}
-
-/**
- * Zod, loaded the same way and for the same reasons.
- *
- * This is the schema language of the **projection wire contract**: the
- * session-projection registry validates every published view with
- * `wire.viewSchema.parse(...)`, and the first-party domains declare those
- * schemas with `import { z } from 'zod'` (`dsh-plan-mode`,
- * `dsh-permission-presets`), not with schemastery. Config schemas are the other
- * way round — `dsh-settings` reads a schemastery `Config` — so the two live
- * side by side here.
- *
- * Zod is optional: {@link viewSchema} falls back to a hand-written validator,
- * because the view is produced by this plugin and the registry only ever calls
- * `parse`.
- */
-let zod = null
-try {
-  zod = (await import('zod')).z
-} catch (_noZod) {
-  zod = null
-}
-
-/**
- * Why the settings form is unavailable, or `null` when it is available.
- * @returns a printable reason, or `null`.
- */
-export function settingsSchemaError () {
-  return schemastery === null ? (schemasteryError ?? 'unknown reason') : null
-}
-
-/**
- * The row's config schema, derived into the *live* settings form the browser
- * renders (`dsh-settings` + `dsh-config-editor`).
- *
- * Both tier blocks are declared `.volatile()`, which is what makes them
- * editable in place: a write to the profile's `cordis.patch.yml` re-resolves
- * the config and updates these stable references through
- * `loader/volatile-update` **without remounting the plugin**. A non-volatile
- * field would force a full row reload on every edit instead.
- *
- * The bounds restate the floors `resolveConfig` enforces, so a form write is
- * refused at the settings boundary with a schema message rather than landing
- * and failing the plugin on the next reload. `resolveConfig` stays as the
- * belt-and-braces check for hand-edited YAML.
- */
-export const Config = schemastery === null
-  ? undefined
-  : schemastery.object({
-      default: schemastery
-        .object({
-          // **No `.default()` here, deliberately.** The Loader resolves this
-          // schema *before* `apply()` runs, so a schema default for `steps`
-          // would fill the key whenever the patch omitted it — and then
-          // `resolveConfig`'s `defaults.steps ?? defaults.toolCalls` could never
-          // reach the legacy alias, silently turning a patch that says
-          // `toolCalls: 6` into 4 steps. The built-in 4 lives in `resolveConfig`,
-          // the only place that can see both keys. The form still shows 4: its
-          // controls carry their own fallback for a value the layer omits.
-          steps: schemastery.number().min(1),
-          // The pre-rename key, kept in the schema so a profile patch that still
-          // carries it validates instead of failing the row before `apply` runs.
-          toolCalls: schemastery.number().min(1),
-          minutes: schemastery.number().min(1).default(2),
-          effort: schemastery.string().default('low'),
-          permission: schemastery.string().default('read-only')
-        })
-        .default({})
-        .volatile(),
-      deep: schemastery
-        .object({
-          steps: schemastery.number().min(5).default(5),
-          minutes: schemastery.number().min(5).default(5),
-          effort: schemastery.string().default('high'),
-          permission: schemastery.string().default('restore')
-        })
-        .default({})
-        .volatile()
-    })
-
-/**
  * Read one config field that a volatile schema turns into a stable reference.
  * A plain value stays itself, so the plugin keeps working in a composition
  * that never resolved the schema.
@@ -207,49 +46,6 @@ export const Config = schemastery === null
  */
 function plainValue (value) {
   return value !== null && typeof value === 'object' && typeof value.get === 'function' ? value.get() : value
-}
-
-/**
- * The client-facing `viewSchema` for the tier projection.
- *
- * The registry validates each published view with `viewSchema.parse`, and the
- * projection wire contract speaks Zod — so a Zod schema is the primary form
- * here, with a hand-written validator for a composition where Zod does not
- * resolve. The fallback is safe by construction: the view is produced by this
- * plugin, so it cannot admit foreign data either way.
- * @returns a `{ parse }` validator.
- */
-function viewSchema () {
-  if (zod !== null) {
-    const tier = zod.object({
-      kind: zod.string(),
-      max: zod.number().nullable(),
-      minutes: zod.number().nullable(),
-      effort: zod.string().nullable()
-    })
-    return zod.object({
-      mode: zod.string(),
-      running: zod.boolean(),
-      tiers: zod.object({ default: tier, deep: tier, free: tier })
-    })
-  }
-  return {
-    parse: (value) => {
-      const tiers = value === null ? undefined : value.tiers
-      if (value === null || typeof value !== 'object' ||
-        typeof value.mode !== 'string' || typeof value.running !== 'boolean' ||
-        tiers === null || typeof tiers !== 'object') {
-        throw new TypeError('dsh-throttle: throttleMode view must be { mode: string, running: boolean, tiers: object }')
-      }
-      for (const mode of MODES) {
-        const entry = tiers[mode]
-        if (entry === null || typeof entry !== 'object' || typeof entry.kind !== 'string') {
-          throw new TypeError(`dsh-throttle: throttleMode view tiers.${mode} must be { kind, max, minutes, effort }`)
-        }
-      }
-      return value
-    }
-  }
 }
 
 /** The prompt section's order: after `PLAN_POLICY` (500), before `TEAM_POLICY` (600). */
@@ -335,8 +131,10 @@ export function apply (ctx, config) {
 
   let settings = initialSettings()
 
-  /** Per-session in-memory budget, keyed by the session object. */
-  const budgets = new WeakMap()
+  /** Per-session in-memory ceiling, keyed by the session object. */
+  const ceilings = new WeakMap()
+  // 只凭本进程实际写入的 pin 恢复委派权限，预设同名不代表插件拥有它。
+  const delegatedPins = new WeakMap()
   /** Per-agent effort-listener disposers, so plugin unload removes them all. */
   const agentDisposers = new Map()
   /** Whether one `provider/model` advertises one effort, cached per process. */
@@ -459,17 +257,17 @@ export function apply (ctx, config) {
   const modeFor = (session) => tierOf(session).mode
 
   /**
-   * The session's budget record, created on first use.
+   * The session's ceiling record, created on first use.
    * @param session - the session to read.
-   * @returns the mutable budget record.
+   * @returns the mutable ceiling record.
    */
-  const budgetOf = (session) => {
-    let budget = budgets.get(session)
-    if (budget === undefined) {
-      budget = emptyUsage()
-      budgets.set(session, budget)
+  const ceilingOf = (session) => {
+    let ceiling = ceilings.get(session)
+    if (ceiling === undefined) {
+      ceiling = emptyUsage()
+      ceilings.set(session, ceiling)
     }
-    return budget
+    return ceiling
   }
 
   /** The permission-preset service, when this profile mounts one. */
@@ -541,8 +339,9 @@ export function apply (ctx, config) {
     const state = throttleState(session)
     if (!tier.child || !tier.inherited) return wantedPreset(settings, tier.mode, state, selectable)
     if (tier.mode === 'default') return settings.default.permission
-    return currentPreset(session) === settings.default.permission
-      ? restoreTarget(settings, state, selectable)
+    const pin = delegatedPins.get(session)
+    return pin !== undefined && currentPreset(session) === pin.preset && selectable(pin.original)
+      ? pin.original
       : undefined
   }
 
@@ -568,11 +367,23 @@ export function apply (ctx, config) {
     const tier = tierOf(session)
     const wanted = wantedPresetFor(session, tier)
     if (wanted === undefined) return undefined
-    if (currentPreset(session) === wanted) return wanted
+    const current = currentPreset(session)
+    if (current === wanted) return wanted
     const applied = applyPreset(session, wanted)
     if (!applied.ok) {
       ctx.logger.warn('dsh-throttle: could not put the session into its %s-tier preset: %s', tier.mode, applied.detail)
       return undefined
+    }
+    if (tier.child && tier.inherited) {
+      if (tier.mode === 'default') {
+        const pin = delegatedPins.get(session)
+        delegatedPins.set(session, {
+          preset: wanted,
+          original: pin !== undefined && current === pin.preset ? pin.original : current
+        })
+      } else {
+        delegatedPins.delete(session)
+      }
     }
     return wanted
   }
@@ -711,47 +522,45 @@ export function apply (ctx, config) {
       if (agent === undefined) return ''
       const session = agent.session
       const tier = tierOf(session)
-      return stateContext(settings, tier.mode, budgetOf(session), Date.now(), permissionFacts(session, tier), {
+      return stateContext(settings, tier.mode, ceilingOf(session), Date.now(), permissionFacts(session, tier), {
         inherited: tier.inherited,
         issue: configIssue
       })
     }
   })
 
-  // ── 2. per-turn budget accounting and tier/permission convergence ─────────
+  // ── 2. per-turn ceiling accounting and tier/permission convergence ─────────
   // The turn boundary is folded from the log, not from `agent/pre-step`: the
   // loop assembles the prompt — and therefore renders the `throttle:state` snapshot
   // — *before* it runs the pre-step waterfall, so a record opened only there is
   // still the previous turn's when a turn's first snapshot is written. Elapsed
   // time is wall clock, so that stale record charged the idle gap between two
-  // turns to the new one (88 minutes of sitting idle read as "88.0 min spent"
+  // turns to the new one (88 minutes of sitting idle read as "88.0 min elapsed"
   // against a 2-minute ceiling). `turn/start` and `turn/end` are committed
   // before the assembly, so the two of them are folded here to keep the snapshot
   // honest; `agent/pre-step` below stays as the in-turn accounting and as the
   // fallback for a log whose turn boundary this listener never saw.
   ctx.on('session/event', (session, event) => {
     if (event?.type !== 'turn/start' && event?.type !== 'turn/end') return
-    observeSessionEvent(budgetOf(session), event, event.time ?? Date.now())
+    observeSessionEvent(ceilingOf(session), event, event.time ?? Date.now())
   })
 
   ctx.on('agent/pre-step', async ({ agent, turn, step }, next) => {
     if (agent !== undefined) {
-      observeStep(budgetOf(agent.session), { turn, step }, Date.now())
+      observeStep(ceilingOf(agent.session), { turn, step }, Date.now())
       reconcile(agent.session)
     }
     return next()
   })
 
-  // A guard denies after the extensible `tools/pre-execute` waterfall and
-  // cannot be overridden by a later listener, which is what "stop at the
-  // ceiling" needs. It runs once per attempted execution, which is the unit the
-  // budget counts.
+  // 守卫在 tools/pre-execute 瀑布之后单调拒绝，每次执行前读取本轮步数与时间。
+  // 计数由 pre-step 更新，工具调用本身不增加步数。
   ctx.tools.guard((exec) => {
     const agent = exec.agent
     if (agent === undefined) return undefined
     const session = agent.session
-    if (!budgets.has(session)) return undefined
-    return guardDecision(settings, modeFor(session), budgetOf(session), Date.now())
+    if (!ceilings.has(session)) return undefined
+    return guardDecision(settings, modeFor(session), ceilingOf(session), Date.now())
   })
 
   // ── 3. reasoning effort per session ──────────────────────────────────────
@@ -798,7 +607,7 @@ export function apply (ctx, config) {
       let note
       if (from === target) note = `(already in the ${MODE_LABELS[target]} tier)`
       else if (target === 'deep') note = '(a second /throttle returns to Tight; /throttle open releases every limit)'
-      else if (target === 'free') note = '(Open tier: this plugin sets no ceiling, changes no permission and pins no reasoning level; /throttle or /throttle on returns to Tight)'
+      else if (target === 'free') note = '(Open tier: no step or time ceiling, no reasoning override; preset restoration and standing collaboration rules still apply; /throttle or /throttle on returns to Tight)'
       else note = from === 'free' ? '(the Open tier is closed; back to Tight)' : '(the Wide tier is closed; back to Tight)'
       // A sub-session that was following its delegator has just been given a
       // tier of its own; say so instead of letting the receipt read as if the

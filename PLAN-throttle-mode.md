@@ -1,5 +1,10 @@
 # /throttle 三档规格（收紧档 / 放宽档 / 放开档）
 
+> 历史设计档案：保留原始方案与后续修订。早期的按工具调用计数、配置报错、UI 待实现等描述不代表当前行为。
+> 当前目标是「有限探索 → 阶段总结 → 用户补充或纠偏 → 下一轮继续」。当前用法见[使用手册](dsh-throttle/README.md)，工程约定见 [AGENTS.md](AGENTS.md)。
+> 当前上限通过拒绝超限工具调用执行，不能硬中断正在进行的生成或工具，也没有 token / 回复长度上限。
+> 2026-10-20 更新：已补充子会话保守权限恢复、75% 软阶段检查点和下一阶段建议。验证进度见[实现记录](IMPLEMENTATION-throttle-mode.md#当前进度2026-10-20)，下文保留历史规格。
+
 > 状态：**已实现**，代码在 `dsh-throttle/`；用法见 [`dsh-throttle/README.md`](dsh-throttle/README.md)，与规格的偏离见 [`IMPLEMENTATION-throttle-mode.md`](IMPLEMENTATION-throttle-mode.md)。
 > 版本：rev.3（rev.3 增加第三档「放开档」，并把档位与只读成因写进模型上下文）
 > 命名（rev.5）：插件由 `dsh-power` 改名为 `dsh-throttle`，命令由 `/power` 改为 `/throttle`；档位 id 仍是 `default` / `deep` / `free`（配置块键名不变），显示名改为「收紧 / 放宽 / 放开」（英文 Tight / Wide / Open）。host 侧文案、模型可见文案与 README 一律英文。
@@ -22,7 +27,7 @@
 | 权限 | 自动切「仅可查看」：写文件、落盘脚本被沙箱拒绝 | 恢复该会话原本的权限预设（可写） | 恢复该会话原本的权限预设（可写），且不再干预 |
 | 能力范围 | 联网搜索 + 只读（读文件/搜索/只读命令） | 全部工具，按原权限 | 全部工具，按原权限 |
 | 撞上限 | 停手，交回「当前结论 + 待确认项 + 建议你验证的命令」 | 同上 | 没有上限可撞 |
-| 定位 | 日常问答、省钱省时 | 深度任务，但有硬上限 | 等同没装插件，放开跑 |
+| 定位 | 日常问答、快速且有边界 | 深度任务，但有硬上限 | 等同没装插件，放开跑 |
 
 撞上限时的交回格式（固定）：
 
@@ -70,7 +75,7 @@
   - `throttle:policy`：system prompt 段，只随档位变（不破坏前缀缓存），放档位契约 + 常驻规则。
   - `throttle:state`：运行时上下文快照，排在 DSH 自带 `sandbox:policy` 之后（order `110 + 2`），放本轮进度、
     交回格式，以及**当前文件策略的成因**（这条只读是本插件收紧档写入的权限预设，不是 DSH 部署默认、
-    也不是用户临时改的）——让模型不再把只读/额度拒绝归因到沙箱。
+    也不是用户临时改的）——让模型不再把只读/上限拒绝归因到沙箱。
 
 ### 5.2 思考开关
 - 走 agent 作用域的 `agent/request` 瀑布（`prepend`），只替换 `reasoningEffort`，与模型选择器互不覆盖
@@ -80,12 +85,12 @@
   - 放开档 → **不下发**（保持会话/选择器自己的值）
 - 不影响其他会话，**不动全局默认**（用户明确要求：思考默认开，由 `/throttle` 来关）。
 
-### 5.3 轮内额度
+### 5.3 轮内上限
 - `agent/pre-step` 监听：payload 带 `{ agent, messages, turn, step, signal }`，按轮统计步数、工具调用次数、耗时。
-- 到额度：注入「停止探索 → 按第 2 节格式交回」的指令（额度耗尽时 `throttle:state` 快照里直接带格式）。
+- 到上限：注入「停止探索 → 按第 2 节格式交回」的指令（上限耗尽时 `throttle:state` 快照里直接带格式）。
 - `ctx.tools.guard()` 拒绝后续工具调用（带理由的拒绝结果，且点名 `dsh-throttle 插件的档位限制`），
-  **逼模型出结论**，而不是静默掐断。guard 单调，后面的监听者无法把花掉的额度变回许可。
-- 收尾步设计：额度用尽后**允许一步不调工具的收尾**（deep 档在第 6 步触发），否则搜索/读取的结果模型看不到。
+  **逼模型出结论**，而不是静默掐断。guard 单调，后面的监听者无法把花掉的上限变回许可。
+- 收尾步设计：上限用尽后**允许一步不调工具的收尾**（deep 档在第 6 步触发），否则搜索/读取的结果模型看不到。
 - 放开档：**不计数、不拒绝**，时间上限也不存在。
 
 ### 5.4 权限闸门
@@ -104,7 +109,7 @@
 1. **新**：`~/.dsh/profiles/desktop/dsh-throttle/`
    - `package.json`（声明 `dsh.bundle.patch`）
    - `cordis.patch.yml`（插入插件行 + 第 7 节配置）
-   - `index.js`（命令、状态、额度、提示词段）
+   - `index.js`（命令、状态、上限、提示词段）
 2. **改**：`~/.dsh/profiles/desktop/package.json`
    - `dependencies` 加 `"dsh-throttle": "file:./dsh-throttle"`
    - `dsh.profile.bundles` 追加 `"dsh-throttle"`
@@ -168,7 +173,7 @@ power:
   "插件自己带配置"准备的位置；表单字段、说明、`恢复默认`/`撤销` 都在那里，保存写 profile 的
   `cordis.patch.yml` 并经 volatile 更新**立即生效、不重启**。
 - ~~会话头部的常驻状态徽章（`/throttle` 开启时可见）~~ → **已实现**为会话头部右侧的档位徽章
-  （`conversation.session.header.utilities`），显示当前档位与额度，点开是切换面板（三段式切换 +
+  （`conversation.session.header.utilities`），显示当前档位与上限，点开是切换面板（三段式切换 +
   当前档位四项事实 + 等价命令 + 跳到配置页）。
 - ~~需要写客户端插件并重建 Web 产物~~ → 客户端插件写了（`dsh-throttle/client.js`），但**不需要重建 Web 产物**：
   DSH 的浏览器插件机制由 `dsh-client-modules` 在启动时把 `dsh.client` 声明扫进 boot 图并按

@@ -7,7 +7,7 @@
 // `scanZstdFrames` does, then decodes each frame on its own.
 //
 // This module is the single copy of that scan: `tools/scan-sessions.mjs`,
-// `tools/read-session.mjs`, and `tools/session-budget-report.mjs` all import it.
+// `tools/read-session.mjs`, and `tools/session-ceiling-report.mjs` all import it.
 //
 // Usage: node tools/session-log-decode.mjs <in.jsonl.zstd> [out.jsonl]
 import { constants, zstdDecompressSync } from 'node:zlib'

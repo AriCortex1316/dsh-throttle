@@ -59,7 +59,7 @@ for (const path of files) {
   console.log(`\n=== ${path}`)
   console.log(`    mtime ${new Date(statSync(path).mtimeMs).toISOString()} · frames ${frames} · records ${lines.length}`)
   console.log(`    types: ${[...types].map(([t, n]) => `${t}×${n}`).join(' ')}`)
-  console.log(`    [throttle] lines: ${has('[throttle]')} · policy lines: ${policy.length}${lastPolicy === undefined ? '' : ` (last: ${lastPolicy})`} · ceiling spent: ${has('ceiling is spent')} · sandbox denied: ${has('sandbox: file access denied')}`)
+  console.log(`    [throttle] lines: ${has('[throttle]')} · policy lines: ${policy.length}${lastPolicy === undefined ? '' : ` (last: ${lastPolicy})`} · ceiling spent: ${has('ceiling is reached')} · sandbox denied: ${has('sandbox: file access denied')}`)
   for (const line of lines) {
     if (!line.includes('[throttle]')) continue
     const match = /\[throttle\][^"\\]{0,150}/.exec(line)
