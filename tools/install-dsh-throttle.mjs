@@ -184,26 +184,15 @@ function patchModelReasoning (text, levels = { low: 'low', high: 'high' }) {
     const dashIndent = /^(\s*)/.exec(lines[start])[1].length
     const keyIndent = ' '.repeat(dashIndent + 2)
     const id = /- id:\s*(\S+)/.exec(lines[start])?.[1] ?? `item ${position + 1}`
-    const declared = lines.findIndex((line, index) => index >= start && index < end && /^\s*reasoningEfforts:\s*$/.test(line))
+    const declared = lines.findIndex((line, index) => index >= start && index < end && line.startsWith(`${keyIndent}reasoningEfforts:`))
+    // 手动声明包含网关映射、内联对象和 false；安装不能替用户重写能力。
+    if (declared !== -1) {
+      notes.push(`model ${id}: keep existing reasoningEfforts`)
+      continue
+    }
     const block = [`${keyIndent}reasoningEfforts:`]
     for (const [level, wire] of Object.entries(levels)) block.push(`${keyIndent}  ${level}: ${wire}`)
-    if (declared === -1) {
-      edits.push({ from: end, to: end, block, id, action: 'declare' })
-    } else {
-      // Replace the whole existing block, so a previous attempt (an empty `off:`,
-      // a commented-out value, a wire spelling the provider rejected) cannot survive.
-      const blockIndent = /^(\s*)/.exec(lines[declared])[1].length
-      let stop = declared + 1
-      while (stop < lines.length) {
-        const line = lines[stop]
-        if (line.trim() !== '' && /^(\s*)/.exec(line)[1].length <= blockIndent) break
-        stop += 1
-      }
-      const existing = lines.slice(declared, stop).join('\n')
-      const wanted = block.join('\n')
-      if (existing === wanted) continue
-      edits.push({ from: declared, to: stop, block, id, action: 'rewrite' })
-    }
+    edits.push({ from: end, to: end, block, id, action: 'declare' })
   }
   if (edits.length === 0) return text
   for (const edit of edits.reverse()) {

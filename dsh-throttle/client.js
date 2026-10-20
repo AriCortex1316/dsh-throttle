@@ -105,6 +105,78 @@ window.__ModuleLoader__.load({
       return effort === null || effort === undefined ? t('effort.none') : effort
     }
 
+    // 选择器展示请求实际采用的档位等级，底层会话选择保留给 Open。
+    // 快照必须稳定，否则原生选择器的 useSyncExternalStore 会重复渲染。
+    function effortDirectory (directory, effort) {
+      let previous
+      let snapshot
+      return {
+        subscribe: (listener) => directory.subscribe(listener),
+        getSnapshot: () => {
+          const state = directory.getSnapshot()
+          if (state === previous) return snapshot
+          previous = state
+          const current = state.current
+          const model = state.groups?.find((group) => group.id === current?.provider)?.models?.find((entry) => entry.id === current?.model)
+          const level = model?.reasoning?.efforts?.find((entry) => entry.id === effort)
+          snapshot = !level || !current ? state : {
+            ...state,
+            current: { ...current, reasoningEffort: effort },
+            retainedEffort: level.name ?? level.id
+          }
+          return snapshot
+        }
+      }
+    }
+
+    function installEffortDisplay (ctx) {
+      if (typeof ctx.slots.entries !== 'function') return
+      const name = 'conversation.input.model'
+      let original
+      let component
+      let dispose
+      let refreshing = false
+      const Marker = () => null
+      const restore = () => {
+        if (original?.component === Selector) original.component = component
+        dispose?.()
+        dispose = undefined
+      }
+      const refresh = () => {
+        if (refreshing) return
+        const entry = ctx.slots.entries(name).find((item) => item.component !== Marker)
+        if (entry === original) return
+        refreshing = true
+        try {
+          restore()
+          original = entry
+          component = entry?.component
+          if (entry) {
+            // 保留原注册身份，原生 renderSlot 的子插槽授权也依赖这个身份。
+            // 低优先级占位只触发注册表刷新，不参与实际渲染。
+            entry.component = Selector
+            dispose = ctx.slots.register({ name, priority: (entry.options.priority ?? 0) + 1 }, Marker)
+          }
+        } finally {
+          refreshing = false
+        }
+      }
+      function Selector (props) {
+        const view = props.useProjection('throttleMode')
+        const effort = view?.tiers?.[view.mode]?.effort
+        const directory = React.useMemo(() => effortDirectory(props.directory, effort), [props.directory, effort])
+        return component ? h(component, { ...props, directory }) : null
+      }
+      ctx.on('slots/changed', (key) => { if (key === name) refresh() })
+      ctx.effect(() => {
+        refresh()
+        return () => {
+          refreshing = true
+          restore()
+        }
+      }, 'dsh-throttle: model effort display')
+    }
+
     /**
      * Execute one `/throttle` line for one session.
      * @param commands - the generated `remote.commands` face.
@@ -814,6 +886,7 @@ window.__ModuleLoader__.load({
     function apply (ctx) {
       const t = ctx.locale.bind(NS)
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-throttle: dictionaries')
+      installEffortDisplay(ctx)
       const navigation = ctx.get('pluginNavigation')
       ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
         name: 'conversation.input.right',

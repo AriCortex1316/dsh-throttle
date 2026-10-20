@@ -19,6 +19,9 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { spawnSync } from 'node:child_process'
 
 import { apply, inject, name } from '../index.js'
 import {
@@ -125,7 +128,7 @@ function fakeCtx (options = {}) {
   })
   const llm = options.llm === false
     ? undefined
-    : { resolveModelInfo: async () => options.modelInfo ?? { reasoning: { efforts: [{ id: 'low' }, { id: 'high' }] } } }
+    : { resolveModelInfo: options.resolveModelInfo ?? (async () => options.modelInfo ?? { reasoning: { efforts: [{ id: 'low' }, { id: 'high' }] } }) }
 
   const ctx = {
     logger: { info () {}, warn (...args) { captured.warnings.push(args.map(String).join(' ')) } },
@@ -991,6 +994,52 @@ test('a profile without the LLM service still applies no unvalidated effort', as
   assert.deepEqual(await bound.ask(seed), seed)
 })
 
+test('reasoning capability is retried after failure and follows catalog updates', async () => {
+  let info = new Error('catalog unavailable')
+  const harness = fakeCtx({ resolveModelInfo: async () => {
+    if (info instanceof Error) throw info
+    return info
+  } })
+  apply(harness.ctx, SHIPPED)
+  const { agent, bound } = await bindAgent(harness)
+  const seed = { provider: 'test', model: 'model', reasoningEffort: 'medium' }
+  assert.deepEqual(await bound.ask(seed), seed)
+  info = { reasoning: { efforts: [{ id: 'low' }, { id: 'high' }] } }
+  assert.equal((await bound.ask(seed)).reasoningEffort, 'low')
+  harness.throttle(agent, 'wide')
+  assert.equal((await bound.ask(seed)).reasoningEffort, 'high')
+  info = { reasoning: undefined }
+  assert.deepEqual(await bound.ask(seed), seed)
+  info = { reasoning: { efforts: [{ id: 'low' }, { id: 'high' }] } }
+  assert.equal((await bound.ask(seed)).reasoningEffort, 'high')
+})
+
+test('plugin reload attaches effort control to existing agents only once', async () => {
+  const listeners = []
+  let disposed = 0
+  const harness = fakeCtx({ agents: { list: () => [agent] } })
+  const agent = {
+    session: harness.session,
+    ctx: { on: (event, listener) => {
+      assert.equal(event, 'agent/request')
+      listeners.push(listener)
+      return () => { disposed += 1 }
+    } }
+  }
+  apply(harness.ctx, SHIPPED)
+  await harness.emit('agent/created', { agent })
+  assert.equal(listeners.length, 1)
+  const seed = { provider: 'test', model: 'model', reasoningEffort: 'medium' }
+  const ask = () => listeners[0]({}, async () => seed)
+  assert.equal((await ask()).reasoningEffort, 'low')
+  harness.throttle(agent, 'wide')
+  assert.equal((await ask()).reasoningEffort, 'high')
+  harness.throttle(agent, 'open')
+  assert.deepEqual(await ask(), seed)
+  for (const factory of harness.captured.effects) factory()()
+  assert.equal(disposed, 1)
+})
+
 test('the guard only counts sessions the plugin has seen', () => {
   const harness = fakeCtx()
   apply(harness.ctx, SHIPPED)
@@ -1102,6 +1151,46 @@ test('both model-facing channels decline to render without an agent', () => {
   assert.equal(section.name, 'throttle:policy')
   assert.equal(section.interpolate, false)
   assert.equal(context.text({}), '')
+})
+
+test('installer preserves custom reasoning declarations during dry run', () => {
+  const fixture = mkdtempSync(join(tmpdir(), 'throttle-install-'))
+  try {
+    const profile = join(fixture, 'profiles', 'desktop')
+    mkdirSync(profile, { recursive: true })
+    writeFileSync(join(profile, 'package.json'), '{}')
+    const patch = [
+      '- id: llm-pi-ai',
+      '  config:',
+      '    providers:',
+      '      custom:',
+      '        models:',
+      '          - id: mapped',
+      '            reasoningEfforts:',
+      '              low: minimal',
+      '              high: ultra',
+      '          - id: inline',
+      '            reasoningEfforts: { low: low, high: high }',
+      '          - id: disabled',
+      '            reasoningEfforts: false',
+      '          - id: missing',
+      ''
+    ].join('\n')
+    writeFileSync(join(profile, 'cordis.patch.yml'), patch)
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL('../../tools/install-dsh-throttle.mjs', import.meta.url))], {
+      env: { ...process.env, DSH_HOME: fixture }, encoding: 'utf8'
+    })
+    assert.equal(result.status, 0, result.stderr)
+    for (const id of ['mapped', 'inline', 'disabled']) {
+      assert.ok(result.stdout.includes(`model ${id}: keep existing reasoningEfforts`))
+    }
+    assert.match(result.stdout, /missing: declare reasoningEfforts/)
+    assert.doesNotMatch(result.stdout, /rewrite reasoningEfforts/)
+    assert.equal(readFileSync(join(profile, 'cordis.patch.yml'), 'utf8'), patch)
+  } finally {
+    // 仅清理本测试由 mkdtemp 创建的隔离目录。
+    rmSync(fixture, { recursive: true, force: true })
+  }
 })
 
 test('unloading the plugin detaches every agent listener', async () => {

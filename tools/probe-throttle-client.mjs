@@ -512,6 +512,80 @@ check('a form the Host does not serve says so', unavailable.includes('没有提�
 const loading = render(React.createElement(page.Component, { ...pageProps, useThrottleConfig: (selector) => selector({ status: 'loading' }) }))
 check('a form still loading says so instead of showing empty boxes', loading.includes('正在读取当前配置'), loading)
 
+// 模拟原生选择器从共享目录读取旧会话选择，验证切档立即改变显示。
+const selectorEntries = []
+const selectorEvents = new Map()
+const selectorCleanups = []
+const selectorName = 'conversation.input.model'
+let selectorView = { mode: 'default', tiers: { default: { effort: 'low' }, deep: { effort: 'high' }, free: { effort: null } } }
+let selectorState = {
+  current: { provider: 'test', model: 'model', reasoningEffort: 'low' },
+  groups: [{ id: 'test', models: [{ id: 'model', reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] } }] }]
+}
+let observedDirectory
+let selectedByUser
+const nativeSelector = {
+  options: { priority: 0 },
+  locale: 'native-model-selector',
+  children: { 'conversation.input.model.label': { kind: 'single', scope: 'session' } },
+  inject: () => ({ directory: { getSnapshot: () => selectorState, subscribe: (fn) => { fn(); return () => {} } }, select: (value) => { selectedByUser = value } }),
+  component: (props) => {
+    observedDirectory = props.directory
+    props.renderSlot('conversation.input.model.label')
+    return props.directory.getSnapshot().current.reasoningEffort
+  }
+}
+const selectorCtx = {
+  ...ctx,
+  on: (event, listener) => { selectorEvents.set(event, listener) },
+  effect: (factory) => { const cleanup = factory(); if (typeof cleanup === 'function') selectorCleanups.push(cleanup) },
+  slots: {
+    inject: () => {},
+    entries: (name) => name === selectorName ? selectorEntries : [],
+    register: (options, component) => {
+      const entry = { options, component, inject: options.inject, locale: options.locale }
+      selectorEntries.push(entry)
+      selectorEvents.get('slots/changed')?.(options.name)
+      return () => {
+        selectorEntries.splice(selectorEntries.indexOf(entry), 1)
+        selectorEvents.get('slots/changed')?.(options.name)
+      }
+    }
+  }
+}
+module.apply(selectorCtx)
+const nativeComponent = nativeSelector.component
+selectorEntries.push(nativeSelector)
+selectorEvents.get('slots/changed')(selectorName)
+const overlay = selectorEntries.find((entry) => entry !== nativeSelector)
+check('模型选择器晚注册后在原注册上安装显示包装，占位不抢占选择器', overlay?.options.priority === 1 && nativeSelector.component !== nativeComponent)
+const selectorProps = {
+  ...nativeSelector.inject('session-1'),
+  useProjection: () => selectorView,
+  renderSlot: (key) => { if (!nativeSelector.children[key]) throw new Error('子插槽未授权') }
+}
+check('原生选择器的子插槽授权、语言和操作均保留', nativeSelector.children['conversation.input.model.label'] !== undefined && nativeSelector.locale === 'native-model-selector')
+const selectorElement = React.createElement(nativeSelector.component, selectorProps)
+check('收紧档在原生选择器显示 low', render(selectorElement) === 'low')
+selectorView = { ...selectorView, mode: 'deep' }
+check('切到放宽后无须发送消息即可显示 high', render(selectorElement) === 'high')
+check('目录派生快照引用稳定', observedDirectory.getSnapshot() === observedDirectory.getSnapshot())
+check('同步显示不改写用户原始会话选择', selectorState.current.reasoningEffort === 'low')
+let notified = false
+observedDirectory.subscribe(() => { notified = true })()
+check('原生目录的后续更新仍通知选择器', notified)
+selectorProps.select({ provider: 'test', model: 'other' })
+check('原生模型选择操作保留', selectedByUser?.model === 'other')
+selectorView = { ...selectorView, mode: 'free' }
+check('放开档恢复显示会话选择 low', render(selectorElement) === 'low')
+selectorView = { ...selectorView, mode: 'deep' }
+selectorState = { ...selectorState, groups: [] }
+check('模型不声明该等级时保留实际会话等级', render(selectorElement) === 'low')
+selectorView = undefined
+check('投影尚未加载时保留原生显示', render(selectorElement) === 'low')
+for (const cleanup of selectorCleanups.reverse()) cleanup()
+check('插件卸载恢复原生选择器和组件身份', selectorEntries.length === 1 && selectorEntries[0] === nativeSelector && nativeSelector.component === nativeComponent)
+
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`)
   process.exitCode = 1

@@ -137,8 +137,6 @@ export function apply (ctx, config) {
   const delegatedPins = new WeakMap()
   /** Per-agent effort-listener disposers, so plugin unload removes them all. */
   const agentDisposers = new Map()
-  /** Whether one `provider/model` advertises one effort, cached per process. */
-  const effortSupport = new Map()
 
   // The live config: the settings form edits the profile patch, the Loader
   // re-resolves the config and updates the volatile references in place, then
@@ -446,29 +444,23 @@ export function apply (ctx, config) {
   /**
    * Ask the LLM service whether one model advertises one reasoning effort, so a
    * model that declares no reasoning capability is left untouched instead of
-   * failing the turn with `UNSUPPORTED_REASONING_EFFORT`. Cached per model.
+   * failing the turn with `UNSUPPORTED_REASONING_EFFORT`.
    * @param provider - the provider route.
    * @param model - the model id.
    * @param effort - the effort id to look for.
    * @returns true when the effort is advertised.
    */
   const supportsEffort = async (provider, model, effort) => {
-    const key = `${provider}\u0000${model}`
-    let advertised = effortSupport.get(key)
-    if (advertised === undefined) {
-      advertised = new Set()
-      const service = ctx.get('llm')
-      if (service !== undefined && typeof service.resolveModelInfo === 'function') {
-        try {
-          const info = await service.resolveModelInfo(provider, model)
-          for (const entry of info?.reasoning?.efforts ?? []) advertised.add(entry.id)
-        } catch (error) {
-          ctx.logger.warn('dsh-throttle: could not read the reasoning capability of %s/%s: %s', provider, model, messageOf(error))
-        }
-      }
-      effortSupport.set(key, advertised)
+    // 能力可能随服务就绪或模型配置更新而改变，不缓存缺失、失败或旧目录。
+    const service = ctx.get('llm')
+    if (typeof service?.resolveModelInfo !== 'function') return false
+    try {
+      const info = await service.resolveModelInfo(provider, model)
+      return (info?.reasoning?.efforts ?? []).some((entry) => entry.id === effort)
+    } catch (error) {
+      ctx.logger.warn('dsh-throttle: could not read the reasoning capability of %s/%s: %s', provider, model, messageOf(error))
+      return false
     }
-    return advertised.has(effort)
   }
 
   /**
@@ -578,6 +570,8 @@ export function apply (ctx, config) {
     for (const dispose of agentDisposers.values()) dispose()
     agentDisposers.clear()
   }, 'dsh-throttle: detach agent listeners')
+  // 重载插件时已有会话不会再次发出 created，需要补挂请求监听。
+  for (const agent of ctx.get('agents')?.list?.() ?? []) attachAgent(agent)
 
   // ── 4. the human command ─────────────────────────────────────────────────
   // The projection folds this command's own `command/run` / `command/done`
